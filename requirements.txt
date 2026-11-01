@@ -1,0 +1,6 @@
+playwright
+curl_cffi
+beautifulsoup4
+pandas
+streamlit>=1.43.0
+Pillow

@@ -1,0 +1,42 @@
+[2026-10-29 17:33:04] DAEMON 24/7 ENCENDIDO (Presiona Ctrl + C para detenerlo)
+[2026-10-29 17:33:04] Horarios programados de barrido automatico: 08:00, 13:00, 18:00, 23:00
+[2026-10-29 17:33:04] ============================================================
+[2026-10-29 17:33:04] ARRANCANDO CICLO AUTOMATICO QUANT-COMMERCE VALLEJO
+[2026-10-29 17:33:04] Iniciando Barrido de Stock y Precios en Vivo (paso3_recolector_ligero.py)...
+[2026-10-29 17:33:04] ADVERTENCIA en paso3_recolector_ligero.py: Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\paso3_recolector_ligero.py", line 130, in <module>
+    ejecutar_recolector_sitemap()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\paso3_recolector_ligero.py", line 74, in ejecutar_recolector_sitemap
+    print(f"\U0001f50d Procesando {len(candidatos)} modelos reales del Sitemap...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Vega\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f50d' in position 0: character maps to <undefined>
+[2026-10-29 17:33:04] Iniciando Auditoria de Tesoreria y Colchon de Poisson (paso5_motor_matematico.py)...
+[2026-10-29 17:33:04] ADVERTENCIA en paso5_motor_matematico.py: Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\paso5_motor_matematico.py", line 70, in <module>
+    evaluar_tesorer�a_y_seguridad()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\paso5_motor_matematico.py", line 33, in evaluar_tesorer�a_y_seguridad
+    print("\U0001f4ca Ejecutando Motor Matem�tico y Auditor�a de Tesorer�a...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Vega\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4ca' in position 0: character maps to <undefined>
+[2026-10-29 17:33:04] CICLO FINALIZADO. Esperando siguiente ventana horaria...
+[2026-10-29 17:33:04] ============================================================
+[2026-10-29 17:44:42] Daemon detenido manualmente por el usuario.
+[2026-10-29 17:45:56] DAEMON 24/7 ENCENDIDO (Presiona Ctrl + C para detenerlo)
+[2026-10-29 17:45:56] Horarios programados de barrido automatico: 08:00, 13:00, 18:00, 23:00
+[2026-10-29 17:45:56] ============================================================
+[2026-10-29 17:45:56] ARRANCANDO CICLO AUTOMATICO QUANT-COMMERCE VALLEJO
+[2026-10-29 17:45:56] Iniciando Barrido de Stock y Precios en Vivo (paso3_recolector_ligero.py)...
+[2026-10-29 17:45:56] OK - Barrido de Stock y Precios en Vivo completado sin errores.
+[2026-10-29 17:45:56] Iniciando Auditoria de Tesoreria y Colchon de Poisson (paso5_motor_matematico.py)...
+[2026-10-29 17:45:56] OK - Auditoria de Tesoreria y Colchon de Poisson completado sin errores.
+[2026-10-29 17:45:56] CICLO FINALIZADO. Esperando siguiente ventana horaria...
+[2026-10-29 17:45:56] ============================================================
+[2026-10-29 17:46:51] Daemon detenido manualmente por el usuario.
