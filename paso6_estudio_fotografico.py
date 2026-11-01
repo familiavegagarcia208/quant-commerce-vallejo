@@ -1,13 +1,10 @@
 """
 =========================================================================================
-PASO 6: ESTUDIO FOTOGRÁFICO B2C (PILLOW HD 1200x1200) - TEXTOS HONESTOS ANTI-RECLAMOS
+PASO 6: ESTUDIO FOTOGRÁFICO B2C (DISEÑO PREMIUM COMPLETO SIN 'CAJA' NI 'ENVÍO HOY')
 =========================================================================================
-CAMBIOS APLICADOS:
-1. Cero menciones a la palabra "Caja" (sustituido por "Empaque de Alta Protección").
-2. Cero promesas de "Sale hoy" / "Envío hoy mismo" (sustituido por "Envío Seguro con
-   Guía de Rastreo" y "Compra Protegida").
-3. Soporte de bandera `--regenerar` para actualizar al instante las láminas 03 y 04
-   de todos los SKUs existentes usando la portada ya recortada si no hay imagen cruda.
+Conserva el diseño visual completo de alta conversión (sello dorado, checks verdes,
+recuadros azules de tallas y tabla doble con semáforo verde), eliminando al 100%
+las palabras "Caja", "Envío hoy" e "Inmediato".
 =========================================================================================
 """
 from __future__ import annotations
@@ -19,7 +16,7 @@ from io import BytesIO
 from pathlib import Path
 
 from curl_cffi import requests as http
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont
 
 RUTA_BD = Path("data/zapateria_vallejo.db")
 DIR_ORIGEN = Path("data/imagenes_origen")
@@ -50,6 +47,17 @@ def cargar_fuente(tamano: int, negrita: bool = False) -> ImageFont.FreeTypeFont 
     return ImageFont.load_default()
 
 
+def limpiar_titulo_visual(nombre_crudo: str) -> str:
+    sin_sku = re.sub(r"\b\d{5,8}\b", "", str(nombre_crudo))
+    sin_par = re.sub(r"[()\[\]/]", " ", sin_sku)
+    palabras: list[str] = []
+    for p in sin_par.split():
+        if p.lower() not in [x.lower() for x in palabras]:
+            palabras.append(p)
+    limpio = " ".join(palabras).upper().strip()
+    return limpio[:38] if limpio else "CALZADO SELECCIONADO"
+
+
 def recortar_bordes_blancos(img: Image.Image) -> Image.Image:
     fondo = Image.new("RGB", img.size, (255, 255, 255))
     diff = ImageChops.difference(img.convert("RGB"), fondo)
@@ -61,7 +69,6 @@ def recortar_bordes_blancos(img: Image.Image) -> Image.Image:
 def obtener_imagen_base(id_ps: str, url_img: str | None) -> Image.Image | None:
     DIR_ORIGEN.mkdir(parents=True, exist_ok=True)
 
-    # 1. Buscar en imagenes_origen
     for ext in (".jpg", ".jpeg", ".png", ".webp"):
         cand = DIR_ORIGEN / f"{id_ps}{ext}"
         if cand.exists():
@@ -70,7 +77,6 @@ def obtener_imagen_base(id_ps: str, url_img: str | None) -> Image.Image | None:
             except Exception:
                 pass
 
-    # 2. Reutilizar 01_portada_blanca.jpg si ya fue generada antes (ideal para GitHub Actions)
     portada_existente = DIR_DESTINO / str(id_ps) / "01_portada_blanca.jpg"
     if portada_existente.exists():
         try:
@@ -78,7 +84,6 @@ def obtener_imagen_base(id_ps: str, url_img: str | None) -> Image.Image | None:
         except Exception:
             pass
 
-    # 3. Descargar desde la URL si está disponible
     if url_img and str(url_img).startswith("http"):
         try:
             r = http.get(str(url_img), impersonate="chrome120", timeout=15)
@@ -109,7 +114,7 @@ def generar_02_angulo_detalle(zapato_limpio: Image.Image, ruta_salida: Path) -> 
     lienzo = Image.new("RGB", LIENZO_ML, (255, 255, 255))
     copia = zapato_limpio.copy()
     copia.thumbnail((1120, 1120), Image.Resampling.LANCZOS)
-    copia = ImageEnhance.Sharpness(copia).enhance(1.15)
+    copia = ImageEnhance.Sharpness(copia).enhance(1.14)
 
     pos_x = (1200 - copia.width) // 2
     pos_y = (1200 - copia.height) // 2
@@ -117,160 +122,305 @@ def generar_02_angulo_detalle(zapato_limpio: Image.Image, ruta_salida: Path) -> 
     lienzo.save(ruta_salida, "JPEG", quality=93, optimize=True)
 
 
-def generar_03_ficha_beneficios(zapato_limpio: Image.Image, ruta_salida: Path) -> None:
+def generar_03_ficha_beneficios(
+    zapato_limpio: Image.Image,
+    nombre_modelo: str,
+    tallas_disponibles: list[float],
+    ruta_salida: Path,
+) -> None:
     """
-    Infografía 1200x1200 SIN la palabra 'Caja' y SIN promesas de 'Sale hoy'.
-    Enfocada en calidad, confort, empaque protegido y envío con seguimiento.
+    Mantiene el diseño visual completo (encabezado marino con línea dorada,
+    4 tarjetas con check verde y barra inferior de tallas azules),
+    pero SIN la palabra 'CAJA' y SIN 'ENVÍO HOY / INMEDIATO'.
     """
-    lienzo = Image.new("RGB", LIENZO_ML, (248, 250, 252))
+    lienzo = Image.new("RGB", LIENZO_ML, (241, 245, 249))
     draw = ImageDraw.Draw(lienzo)
 
-    # Encabezado oscuro elegante
-    draw.rectangle([(0, 0), (1200, 175)], fill=(15, 23, 42))
-    f_titulo = cargar_fuente(42, negrita=True)
-    f_sub = cargar_fuente(24, negrita=False)
-    draw.text((60, 42), "CALIDAD Y CONFORT GARANTIZADO", fill=(255, 255, 255), font=f_titulo)
+    # 1. Encabezado Marino + Línea Dorada + Sello Dorado
+    draw.rounded_rectangle([(20, 20), (1180, 165)], radius=24, fill=(13, 27, 46))
+    draw.rectangle([(20, 157), (1180, 165)], fill=(245, 158, 11))
+
+    titulo_limpio = limpiar_titulo_visual(nombre_modelo)
+    f_tit = cargar_fuente(36, negrita=True)
+    f_sub = cargar_fuente(20, negrita=True)
+    draw.text((55, 45), titulo_limpio, fill=(255, 255, 255), font=f_tit)
     draw.text(
-        (60, 105),
-        "Calzado nuevo seleccionado · Revisión física par por par",
+        (55, 102),
+        "CALZADO 100% NUEVO Y ORIGINAL  ·  GARANTÍA DIRECTA",
         fill=(148, 163, 184),
         font=f_sub,
     )
 
-    # Tarjeta blanca izquierda para lucir el calzado
-    draw.rounded_rectangle([(50, 220), (540, 1040)], radius=28, fill=(255, 255, 255), outline=(226, 232, 240), width=3)
+    # Sello dorado superior derecho
+    draw.rounded_rectangle([(855, 48), (1145, 98)], radius=22, fill=(245, 158, 11))
+    f_sello = cargar_fuente(20, negrita=True)
+    draw.text((882, 61), "CALIDAD GARANTIZADA", fill=(13, 27, 46), font=f_sello)
+
+    # 2. Tarjeta Izquierda con Foto y Píldoras Honestras
+    draw.rounded_rectangle(
+        [(35, 190), (555, 885)],
+        radius=26,
+        fill=(255, 255, 255),
+        outline=(219, 234, 254),
+        width=3,
+    )
+    draw.ellipse([(105, 315), (485, 695)], fill=(241, 245, 249))
+
+    # Píldora superior verde (Sin "Inmediato")
+    draw.rounded_rectangle(
+        [(95, 215), (495, 265)],
+        radius=22,
+        fill=(220, 252, 231),
+        outline=(34, 197, 94),
+        width=2,
+    )
+    f_pil = cargar_fuente(20, negrita=True)
+    draw.text((150, 228), "ENVÍO SEGURO DESDE CDMX", fill=(21, 128, 61), font=f_pil)
+
     zapato_mini = zapato_limpio.copy()
-    zapato_mini.thumbnail((430, 720), Image.Resampling.LANCZOS)
-    zx = 50 + (490 - zapato_mini.width) // 2
-    zy = 220 + (820 - zapato_mini.height) // 2
+    zapato_mini.thumbnail((450, 480), Image.Resampling.LANCZOS)
+    zx = 35 + (520 - zapato_mini.width) // 2
+    zy = 290 + (490 - zapato_mini.height) // 2
     lienzo.paste(zapato_mini, (zx, zy))
 
-    # 4 Bloques de Beneficios Honestos (Cero "caja", cero "sale hoy")
-    beneficios = [
+    # Píldora inferior azul
+    draw.rounded_rectangle([(65, 810), (525, 860)], radius=20, fill=(219, 234, 254))
+    f_pil_b = cargar_fuente(19, negrita=True)
+    draw.text((95, 824), "DISEÑO CÓMODO, LIGERO Y RESISTENTE", fill=(29, 78, 216), font=f_pil_b)
+
+    # 3. Columna Derecha: 4 Tarjetas con Check Verde (Sin "Caja" ni "Inmediato")
+    tarjetas = [
         (
-            "PRODUCTO 100% NUEVO Y VERIFICADO",
-            "Inspeccionamos costuras, suela y acabados antes de despachar.",
-        ),
-        (
-            "DISEÑO CÓMODO PARA USO DIARIO",
-            "Horma confortable y materiales resistentes de gran durabilidad.",
+            "CALZADO 100% NUEVO Y ORIGINAL",
+            "Recibe tu calzado totalmente nuevo, verificado",
+            "par por par antes de su despacho.",
         ),
         (
             "EMPAQUE DE ALTA PROTECCIÓN",
-            "Acondicionado con material protector para cuidar tu calzado en ruta.",
+            "Acondicionamos tu pedido con material protector",
+            "de alta seguridad y guía de seguimiento.",
         ),
         (
-            "ENVÍO SEGURO CON RASTREO",
-            "Despacho ágil por Mercado Envíos con guía de seguimiento paso a paso.",
+            "MÁXIMA COMODIDAD DIARIA",
+            "Plantilla suave y suela antiderrapante ideal",
+            "para brindar confort en largas jornadas.",
+        ),
+        (
+            "COMPRA 100% PROTEGIDA",
+            "Si la talla no te queda, tu cambio o devolución",
+            "es sencillo, seguro y respaldado por la plataforma.",
         ),
     ]
 
-    f_ben_tit = cargar_fuente(24, negrita=True)
-    f_ben_desc = cargar_fuente(19, negrita=False)
+    f_card_t = cargar_fuente(23, negrita=True)
+    f_card_d = cargar_fuente(19, negrita=False)
+    f_check = cargar_fuente(24, negrita=True)
 
-    y_cursor = 220
-    for titulo_b, desc_b in beneficios:
+    y_c = 190
+    for tit_c, lin1, lin2 in tarjetas:
         draw.rounded_rectangle(
-            [(580, y_cursor), (1150, y_cursor + 180)],
+            [(585, y_c), (1165, y_c + 158)],
             radius=20,
             fill=(255, 255, 255),
             outline=(203, 213, 225),
             width=2,
         )
-        # Barra lateral de acento azul
-        draw.rounded_rectangle([(580, y_cursor), (596, y_cursor + 180)], radius=8, fill=(37, 99, 235))
-        draw.text((620, y_cursor + 38), titulo_b, fill=(15, 23, 42), font=f_ben_tit)
-        draw.text((620, y_cursor + 88), desc_b, fill=(71, 85, 105), font=f_ben_desc)
-        y_cursor += 210
+        draw.rounded_rectangle([(585, y_c), (597, y_c + 158)], radius=6, fill=(29, 78, 216))
+        # Círculo verde con check
+        draw.ellipse([(615, y_c + 52), (665, y_c + 102)], fill=(22, 163, 74))
+        draw.text((629, y_c + 61), "✓", fill=(255, 255, 255), font=f_check)
 
-    # Pie de página informativo y transparente
-    draw.rectangle([(0, 1090), (1200, 1200)], fill=(241, 245, 249))
-    f_pie = cargar_fuente(22, negrita=True)
+        draw.text((685, y_c + 24), tit_c, fill=(13, 27, 46), font=f_card_t)
+        draw.text((685, y_c + 66), lin1, fill=(71, 85, 105), font=f_card_d)
+        draw.text((685, y_c + 96), lin2, fill=(71, 85, 105), font=f_card_d)
+        y_c += 178
+
+    # 4. Barra Inferior de Tallas (Sin "ENVÍO HOY")
+    draw.rounded_rectangle(
+        [(35, 905), (1165, 1175)],
+        radius=22,
+        fill=(255, 255, 255),
+        outline=(203, 213, 225),
+        width=2,
+    )
+    draw.rounded_rectangle([(35, 905), (1165, 958)], radius=18, fill=(23, 37, 84))
+    f_bar = cargar_fuente(22, negrita=True)
     draw.text(
-        (60, 1132),
-        "COMPRA PROTEGIDA · GARANTÍA DE SATISFACCIÓN DE 30 DÍAS",
-        fill=(30, 41, 59),
-        font=f_pie,
+        (310, 920),
+        "TALLAS NACIONALES (MX) DISPONIBLES EN STOCK:",
+        fill=(255, 255, 255),
+        font=f_bar,
+    )
+
+    tallas_mostrar = tallas_disponibles[:8] if tallas_disponibles else [22.0, 23.0, 24.0, 25.0, 26.0, 27.0]
+    ancho_box = 112
+    espacio = 16
+    total_w = len(tallas_mostrar) * ancho_box + (len(tallas_mostrar) - 1) * espacio
+    x_talla = (1200 - total_w) // 2
+    f_num = cargar_fuente(26, negrita=True)
+    f_est = cargar_fuente(16, negrita=False)
+
+    for t_val in tallas_mostrar:
+        draw.rounded_rectangle(
+            [(x_talla, 975), (x_talla + ancho_box, 1090)],
+            radius=14,
+            fill=(37, 99, 235),
+        )
+        txt_t = f"{t_val:.1f}" if not float(t_val).is_integer() else f"{int(t_val)}.0"
+        draw.text((x_talla + 24, 990), txt_t, fill=(255, 255, 255), font=f_num)
+        draw.text((x_talla + 22, 1042), "En stock", fill=(219, 234, 254), font=f_est)
+        x_talla += ancho_box + espacio
+
+    # Aviso inferior hacia la foto 4
+    draw.rounded_rectangle([(65, 1110), (1135, 1158)], radius=14, fill=(239, 246, 255))
+    draw.ellipse([(82, 1119), (112, 1149)], fill=(37, 99, 235))
+    draw.text((93, 1121), "i", fill=(255, 255, 255), font=cargar_fuente(20, negrita=True))
+    draw.text(
+        (128, 1123),
+        "¿Duda con tu número? Revisa la tabla en centímetros en la siguiente foto antes de comprar.",
+        fill=(30, 58, 138),
+        font=cargar_fuente(19, negrita=True),
     )
 
     lienzo.save(ruta_salida, "JPEG", quality=93, optimize=True)
 
 
-def generar_04_guia_tallas(tallas_disponibles: list[str], ruta_salida: Path) -> None:
+def generar_04_guia_tallas(tallas_disponibles: list[float], ruta_salida: Path) -> None:
     """
-    Guía de tallas en centímetros (MX) sin promesas de horario ni referencias a caja.
+    Tabla doble de equivalencias en CM con semáforo verde y 3 pasos abajo,
+    cambiando 'Talla lista para envío hoy' por 'Talla disponible en stock'.
     """
-    lienzo = Image.new("RGB", LIENZO_ML, (255, 255, 255))
+    lienzo = Image.new("RGB", LIENZO_ML, (241, 245, 249))
     draw = ImageDraw.Draw(lienzo)
 
-    # Encabezado
-    draw.rectangle([(0, 0), (1200, 170)], fill=(30, 41, 59))
-    f_tit = cargar_fuente(42, negrita=True)
-    f_sub = cargar_fuente(24, negrita=False)
-    draw.text((60, 40), "GUÍA DE TALLAS NACIONAL (MÉXICO)", fill=(255, 255, 255), font=f_tit)
+    # Encabezado Marino + Línea Dorada
+    draw.rounded_rectangle([(20, 20), (1180, 160)], radius=24, fill=(13, 27, 46))
+    draw.rectangle([(20, 152), (1180, 160)], fill=(245, 158, 11))
+
+    f_tit = cargar_fuente(38, negrita=True)
+    f_sub = cargar_fuente(20, negrita=True)
+    draw.text((135, 42), "GUÍA DE TALLAS EN CENTÍMETROS (MÉXICO)", fill=(255, 255, 255), font=f_tit)
     draw.text(
-        (60, 102),
-        "Las tallas están expresadas en centímetros (CM) exactos del pie",
-        fill=(203, 213, 225),
+        (260, 100),
+        "TABLA COMPLETA DE EQUIVALENCIAS  ·  HORMA NACIONAL EXACTA",
+        fill=(148, 163, 184),
         font=f_sub,
     )
 
-    # Extraer números de talla limpios
-    nums = sorted(
-        {
-            float(re.findall(r"\d+(?:\.\d+)?", str(t))[0])
-            for t in tallas_disponibles
-            if re.findall(r"\d+(?:\.\d+)?", str(t))
-        }
-    )
-    if not nums:
-        nums = [22.0, 23.0, 24.0, 25.0, 26.0, 27.0]
+    # Determinar rango de tallas (Infantil vs Juvenil/Adulto)
+    min_t = min(tallas_disponibles) if tallas_disponibles else 22.0
+    if min_t < 21.0:
+        rango_base = [15.0 + 0.5 * i for i in range(16)]  # 15.0 a 22.5 MX
+    else:
+        rango_base = [21.0 + 0.5 * i for i in range(16)]  # 21.0 a 28.5 MX
 
-    # Encabezados de tabla
-    draw.rounded_rectangle([(80, 220), (1120, 300)], radius=14, fill=(241, 245, 249))
-    f_th = cargar_fuente(26, negrita=True)
-    draw.text((180, 245), "TALLA MÉXICO (MX)", fill=(15, 23, 42), font=f_th)
-    draw.text((680, 245), "LARGO RECOMENDADO DEL PIE", fill=(15, 23, 42), font=f_th)
+    set_activas = {round(float(x), 1) for x in tallas_disponibles}
 
-    f_td = cargar_fuente(25, negrita=False)
-    max_filas = min(len(nums), 10)
-    alto_fila = 62
-    y_fila = 315
+    # Dos bloques de tabla lado a lado (8 filas cada uno)
+    bloques = [(35, 585, rango_base[:8]), (615, 1165, rango_base[8:16])]
+    f_th = cargar_fuente(19, negrita=True)
+    f_td_b = cargar_fuente(20, negrita=True)
+    f_td = cargar_fuente(19, negrita=False)
 
-    for idx, n in enumerate(nums[:max_filas]):
-        bg = (255, 255, 255) if idx % 2 == 0 else (248, 250, 252)
-        draw.rectangle([(80, y_fila), (1120, y_fila + alto_fila)], fill=bg, outline=(226, 232, 240))
-        etiqueta_mx = f"{int(n)} MX" if n.is_integer() else f"{n:.1f} MX"
-        etiqueta_cm = f"{n:.1f} cm"
-        draw.text((250, y_fila + 16), etiqueta_mx, fill=(15, 23, 42), font=f_td)
-        draw.text((790, y_fila + 16), etiqueta_cm, fill=(37, 99, 235), font=f_td)
-        y_fila += alto_fila
+    for x1, x2, sub_lista in bloques:
+        draw.rounded_rectangle(
+            [(x1, 185), (x2, 825)],
+            radius=20,
+            fill=(255, 255, 255),
+            outline=(203, 213, 225),
+            width=2,
+        )
+        draw.rounded_rectangle([(x1, 185), (x2, 242)], radius=16, fill=(23, 37, 84))
+        draw.text((x1 + 35, 203), "TALLA MX", fill=(255, 255, 255), font=f_th)
+        draw.text((x1 + 205, 203), "TU PIE (CM)", fill=(255, 255, 255), font=f_th)
+        draw.text((x1 + 395, 203), "PLANTILLA", fill=(255, 255, 255), font=f_th)
 
-    # Recuadro de consejo práctico de medición
-    y_tip = max(y_fila + 30, 950)
-    draw.rounded_rectangle([(80, y_tip), (1120, 1140)], radius=18, fill=(239, 246, 255), outline=(191, 219, 254), width=2)
-    f_tip_t = cargar_fuente(24, negrita=True)
-    f_tip_d = cargar_fuente(20, negrita=False)
-    draw.text((115, y_tip + 25), "¿Cómo confirmar tu talla ideal en casa?", fill=(30, 64, 175), font=f_tip_t)
+        y_r = 250
+        for idx, t_mx in enumerate(sub_lista):
+            activa = round(t_mx, 1) in set_activas
+            bg = (220, 252, 231) if activa else ((255, 255, 255) if idx % 2 == 0 else (248, 250, 252))
+            draw.rectangle([(x1 + 8, y_r), (x2 - 8, y_r + 68)], fill=bg)
+
+            if activa:
+                draw.ellipse([(x1 + 18, y_r + 26), (x1 + 32, y_r + 40)], fill=(22, 163, 74))
+
+            color_t = (21, 128, 61) if activa else (15, 23, 42)
+            draw.text((x1 + 42, y_r + 21), f"{t_mx:.1f} MX", fill=color_t, font=f_td_b)
+            draw.text(
+                (x1 + 195, y_r + 22),
+                f"{t_mx - 0.3:.1f} a {t_mx:.1f} cm",
+                fill=(71, 85, 105),
+                font=f_td,
+            )
+            draw.text((x1 + 405, y_r + 21), f"{t_mx + 0.5:.1f} cm", fill=(37, 99, 235), font=f_td_b)
+            y_r += 70
+
+    # Sección inferior: 3 pasos (Sin "envío hoy")
+    f_pasos_tit = cargar_fuente(22, negrita=True)
     draw.text(
-        (115, y_tip + 70),
-        "Coloca tu pie sobre una hoja de papel pegado a la pared, marca desde el talón hasta el dedo",
-        fill=(30, 41, 59),
-        font=f_tip_d,
+        (95, 852),
+        "¿CÓMO MEDIR TU PIE EN CASA EN 3 SIMPLES PASOS?",
+        fill=(13, 27, 46),
+        font=f_pasos_tit,
     )
+    draw.ellipse([(680, 856), (698, 874)], fill=(22, 163, 74))
     draw.text(
-        (115, y_tip + 105),
-        "más largo y mide los centímetros con una regla. Elige la talla MX equivalente a tus centímetros.",
-        fill=(30, 41, 59),
-        font=f_tip_d,
+        (706, 852),
+        "(= Talla disponible en stock)",
+        fill=(21, 128, 61),
+        font=f_pasos_tit,
     )
+
+    pasos = [
+        (
+            "1",
+            "APOYA EL TALÓN",
+            "Coloca una hoja de papel en el",
+            "piso pegada a la pared y pisa",
+            "firme con el talón tocando la pared.",
+        ),
+        (
+            "2",
+            "HAZ UNA MARCA",
+            "Con un lápiz derecho, traza",
+            "una pequeña línea justo donde",
+            "termina tu dedo más largo.",
+        ),
+        (
+            "3",
+            "MIDE CON REGLA",
+            "Mide en centímetros desde el",
+            "borde de la hoja hasta la marca",
+            "y busca tu talla en la tabla.",
+        ),
+    ]
+
+    x_p = 35
+    for num_p, tit_p, l1, l2, l3 in pasos:
+        draw.rounded_rectangle(
+            [(x_p, 895), (x_p + 360, 1170)],
+            radius=18,
+            fill=(255, 255, 255),
+            outline=(191, 219, 254),
+            width=2,
+        )
+        draw.rounded_rectangle([(x_p, 895), (x_p + 360, 907)], radius=6, fill=(37, 99, 235))
+        draw.ellipse([(x_p + 22, 922), (x_p + 66, 966)], fill=(37, 99, 235))
+        draw.text((x_p + 37, 930), num_p, fill=(255, 255, 255), font=cargar_fuente(24, negrita=True))
+        draw.text((x_p + 80, 932), tit_p, fill=(13, 27, 46), font=cargar_fuente(22, negrita=True))
+
+        f_p_txt = cargar_fuente(18, negrita=False)
+        draw.text((x_p + 24, 990), l1, fill=(71, 85, 105), font=f_p_txt)
+        draw.text((x_p + 24, 1020), l2, fill=(71, 85, 105), font=f_p_txt)
+        draw.text((x_p + 24, 1050), l3, fill=(71, 85, 105), font=f_p_txt)
+        x_p += 385
 
     lienzo.save(ruta_salida, "JPEG", quality=93, optimize=True)
 
 
 def ejecutar_estudio_fotografico(regenerar: bool = False) -> None:
     print("=" * 88)
-    print("📸 PASO 6: ESTUDIO FOTOGRÁFICO B2C (SIN 'CAJA' Y SIN 'SALE HOY')")
+    print("📸 PASO 6: REGENERANDO ESTUDIO FOTOGRÁFICO HD (SIN 'CAJA' NI 'ENVÍO HOY')")
     print("=" * 88)
 
     if not RUTA_BD.exists():
@@ -282,18 +432,26 @@ def ejecutar_estudio_fotografico(regenerar: bool = False) -> None:
     col_img = "url_imagen" if "url_imagen" in cols else ("imagen_url" if "imagen_url" in cols else None)
 
     query = f"SELECT id_ps, nombre_modelo, {col_img if col_img else 'NULL'} FROM zapatos_candidatos"
-    candidatos = conn.execute(query).fetchall()
+    mapa_bd: dict[str, tuple[str, str | None]] = {}
+    for id_ps, nombre, url_img in conn.execute(query).fetchall():
+        mapa_bd[str(id_ps)] = (str(nombre or f"Modelo {id_ps}"), url_img)
+
+    # Incluir también cualquier carpeta que ya exista en data/catalogo_listo (ej. 1250365)
+    if DIR_DESTINO.exists():
+        for carpeta in DIR_DESTINO.iterdir():
+            if carpeta.is_dir() and carpeta.name not in mapa_bd:
+                mapa_bd[carpeta.name] = (f"Calzado {carpeta.name}", None)
 
     procesados = 0
-    for id_ps, nombre, url_img in candidatos:
-        id_str = str(id_ps)
+    for id_str, (nombre, url_img) in sorted(mapa_bd.items()):
         carpeta_sku = DIR_DESTINO / id_str
         f1 = carpeta_sku / "01_portada_blanca.jpg"
         f2 = carpeta_sku / "02_angulo_galeria.jpg"
         f3 = carpeta_sku / "03_ficha_beneficios.jpg"
         f4 = carpeta_sku / "04_guia_tallas_cm.jpg"
 
-        if not regenerar and f1.exists() and f3.exists() and f4.exists():
+        # Solo procesar SKUs que ya tienen carpeta en catalogo_listo o imagen base
+        if not carpeta_sku.exists() and not (DIR_ORIGEN / f"{id_str}.jpg").exists():
             continue
 
         img_base = obtener_imagen_base(id_str, url_img)
@@ -308,35 +466,38 @@ def ejecutar_estudio_fotografico(regenerar: bool = False) -> None:
         if not f2.exists() or regenerar:
             generar_02_angulo_detalle(zapato_recortado, f2)
 
-        # Regenerar siempre la ficha de beneficios y guía de tallas cuando se pide --regenerar
-        generar_03_ficha_beneficios(zapato_recortado, f3)
-
         tallas_rows = conn.execute(
             """
             SELECT DISTINCT talla
             FROM historial_stock_21_dias
             WHERE id_ps = ? AND stock_seguro_publicable > 0
+            ORDER BY CAST(talla AS REAL) ASC
             """,
             (id_str,),
         ).fetchall()
-        lista_tallas = [str(r[0]) for r in tallas_rows]
-        generar_04_guia_tallas(lista_tallas, f4)
+
+        nums_tallas = sorted(
+            {
+                float(re.findall(r"\d+(?:\.\d+)?", str(r[0]))[0])
+                for r in tallas_rows
+                if re.findall(r"\d+(?:\.\d+)?", str(r[0]))
+            }
+        )
+
+        generar_03_ficha_beneficios(zapato_recortado, nombre, nums_tallas, f3)
+        generar_04_guia_tallas(nums_tallas, f4)
 
         procesados += 1
-        print(f"✅ [{id_str}] Carrusel actualizado sin 'caja' ni 'sale hoy' -> {nombre[:42]}")
+        print(f"✅ [{id_str}] Láminas 03 y 04 actualizadas -> {nombre[:40]}")
 
     conn.close()
     print("=" * 88)
-    print(f"🎉 Estudio finalizado: {procesados} carruseles generados/actualizados en `{DIR_DESTINO}`.")
+    print(f"🎉 Total actualizado: {procesados} carruseles limpios en `{DIR_DESTINO}`.")
     print("=" * 88)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Estudio Fotográfico B2C Pillow")
-    parser.add_argument(
-        "--regenerar",
-        action="store_true",
-        help="Regenera todas las fichas de beneficios y guías de tallas aunque ya existan",
-    )
+    parser.add_argument("--regenerar", action="store_true", help="Regenera todas las láminas")
     args = parser.parse_args()
     ejecutar_estudio_fotografico(regenerar=args.regenerar)
