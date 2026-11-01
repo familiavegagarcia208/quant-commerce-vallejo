@@ -1,95 +1,69 @@
 """
 =========================================================================================
-PASO 5: MOTOR FINANCIERO OMNICANAL + COLCHÓN MÁGICO DE INVENTARIO (POISSON)
+PASO 5: MOTOR FINANCIERO Y MATEMÁTICO DE DOBLE BLINDAJE (ANTI-DEVOLUCIONES + BEST-SELLERS)
 =========================================================================================
-
-ESTRATEGIA FINANCIERA Y FISCAL DOCUMENTADA: "LIQUIDEZ BANCARIA PURA + BONO DE IVA A FAVOR"
-
-1. EL PROBLEMA DE LA LIQUIDEZ EN MARKETPLACES (MÉXICO):
-   Cuando vendes un producto en Mercado Libre, Amazon o TikTok Shop con tu RFC dado de alta,
-   la plataforma aplica por ley una retención directa sobre el precio sin IVA (Precio / 1.16):
-   - 8% de IVA retenido (la mitad del 16% de IVA total).
-   - 1% de ISR retenido.
-   Esto equivale a un descuento directo en efectivo del ~7.76% sobre el precio final de venta
-   [(0.08 + 0.01) / 1.16 = 0.077586]. La plataforma le envía ese dinero directamente al SAT
-   antes de depositar tus ganancias en tu cuenta bancaria.
-
-2. ¿CÓMO SE GENERA EL "IVA A FAVOR" (Y POR QUÉ NO LO USAMOS PARA INFLAR LA UTILIDAD LÍQUIDA)?
-   En México, el IVA funciona por compensación (IVA Cobrado al Cliente menos IVA Pagado en Gastos):
-   - IVA Trasladado (Cobrado): El 16% incluido dentro del precio al que vendes el zapato.
-   - IVA Acreditable (Ya pagado por ti):
-       a) El 16% de IVA incluido en tu factura de compra de Price Shoes (Costo Socio).
-       b) El 16% de IVA incluido en la factura de comisión que te cobra el Marketplace.
-       c) El 16% de IVA incluido en el costo de envío (Mercado Envíos / Logística) y empaque.
-
-   Ejemplo práctico (Tenis de $479.00 vendido en $958.00 en Mercado Libre)[cite: 1]:
-   - IVA total cobrado al cliente ($958 / 1.16 * 0.16)       = $132.14
-   - Menos IVA que ya pagó Mercado Libre al SAT por ti (8%)  = -$66.07
-   - IVA restante que en teoría deberías pagar al SAT (8%)   =  $66.07
-   - Menos tu IVA Acreditable (Price Shoes $66.07 + Comisión ML $23.12 + Envío $16.97) = -$106.16
-   - Resultado en declaración mensual: $66.07 - $106.16 = -$40.09 (SALDO DE IVA A FAVOR EN EL SAT).
-
-3. REGLA DE ORO OPERATIVA DE ESTE SCRIPT:
-   Para evitar descapitalización al ir a resurtir a la sucursal Vallejo:
-   - La columna `utilidad_neta_ml` (Efectivo Libre en Banco) DESCUENTA DE GOLPE el 7.76% de
-     retención del SAT y el 2% del Fondo de Merma como dinero que ya salió de tu bolsillo.
-     Representa billetes 100% líquidos depositados en tu cuenta tras reponer el par de zapatos.
-   - La columna `iva_a_favor_ml` calcula por separado el excedente de IVA acreditable que se
-     acumula a tu favor en el SAT al facturar tus compras en Price Shoes. Este monto se trata
-     como un "Bono Fiscal Contable" independiente del flujo de caja diario.
+REGLAS DE ARQUITECTURA CORREGIDAS:
+1. PISO FÍSICO ANTI-DEVOLUCIONES POR TALLA (`PISO_FANTASMA_TALLA = 5`):
+   Cualquier talla con <= 5 pares en Vallejo se considera stock de riesgo (devoluciones,
+   exhibición o cajas extraviadas) y recibe `stock_seguro_publicable = 0`.
+2. COLCHÓN COMPUESTO DE POISSON (95% CONFIANZA):
+   Sobre los 5 pares intocables, se descuenta además la demanda esperada de Poisson
+   durante el tiempo de recolección: Colchón = 5 + ceil(lambda + 1.65 * sqrt(lambda)).
+3. FILTRO DE ÉLITE MENSUAL (`apto_publicar = 1`):
+   Solo autoriza los productos que más se venden (Tier S y A por rotación Bayesiana UCB
+   y profundidad de lote), con mínimo 2 tallas activas y >= 6 pares libres post-blindaje.
 =========================================================================================
 """
+from __future__ import annotations
+
 import math
 import sqlite3
 from pathlib import Path
 
 RUTA_BD = Path("data/zapateria_vallejo.db")
 
-# ===========================================================================
-# PARÁMETROS DE FLUJO DE EFECTIVO PURO (LIQUIDEZ BANCARIA)
-# ===========================================================================
-TASA_IVA_MEXICO = 0.16          # 16% tasa general de IVA en México
-FONDO_MERMA = 0.02              # 2% intocable separado en efectivo para absorber devoluciones
-RETENCION_SAT_DIRECTA = 0.0776  # 7.76% retenido en efectivo por la plataforma ((8% IVA + 1% ISR) / 1.16)
-ROI_EFECTIVO_META = 0.185       # 18.5% de retorno líquido en banco sobre Costo Socio
-ROI_EFECTIVO_PISO = 0.120       # 12.0% de retorno líquido mínimo para guerra de precios
-COSTO_EMPAQUE = 15.0            # Bolsa de seguridad / cinta / etiqueta ($ MXN con IVA incluido)
+# ---------------------------------------------------------------------------
+# Parámetros del Nuevo Blindaje Físico y Estadístico
+# ---------------------------------------------------------------------------
+PISO_FANTASMA_TALLA = 5       # Los primeros 5 pares de cada talla NO se tocan (devoluciones/exhibición)
+Z_CONF_95 = 1.645             # Cuantil normal para 95% de confianza unilateral
+TAU_DIAS = 1.0                # Ventana de exposición antes de recolección en tienda (días)
+LAMBDA_PRIOR_TALLA = 0.25     # Tasa previa conservadora por talla cuando inicia el historial
+MIN_TALLAS_SEGURAS = 2        # Mínimo de tallas que deben superar el blindaje de 5 + Poisson
+MIN_PARES_PUBLICABLES = 6     # Mínimo de pares libres totales después de descontar todo el blindaje
+TIERS_PERMITIDOS = ("S", "A") # Solo trabajar con los productos estrella (Tier S y Tier A)
 
-CANALES = {
-    "mercado_libre": {
-        "comision": 0.175,      # 17.5% Publicación Clásica Calzado (IVA incluido)
-        "envio": 108.0          # Mercado Envíos promedio en calzado (< 1 kg, IVA incluido)
-    },
-    "amazon": {
-        "comision": 0.150,      # 15.0% Tarifa por referencia Calzado Amazon MX
-        "envio": 105.0
-    },
-    "tiktok_shop": {
-        "comision": 0.080,      # 8.0% Comisión TikTok Shop MX
-        "envio": 85.0
-    }
-}
-
-# Parámetros del "Colchón Mágico" (Seguridad de Stock en Vallejo vía Distribución de Poisson)
-STOCK_MINIMO_PISO = 3           # Si en Vallejo hay <= 3 pares en una talla, se publica 0
-DIAS_RESPUESTA_COMPRA = 1.5     # Días de margen para acudir a Vallejo a recoger el par vendido
+# ---------------------------------------------------------------------------
+# Parámetros Financieros y Fiscales (México - Persona Física con Actividad Empresarial)
+# ---------------------------------------------------------------------------
+IVA_TASA = 0.16
+COMISION_ML_CLASICA = 0.175
+COMISION_AMAZON = 0.15
+COMISION_TIKTOK = 0.08
+RETENCION_IVA_ML = 0.08       # Mitad del IVA (8%)
+RETENCION_ISR_ML = 0.025      # 2.5% sobre base sin IVA -> Total efectivo ~7.76% sobre precio bruto
+RESERVA_MERMA_PCT = 0.02      # 2% de fondo de autoseguro para devoluciones
+MARGEN_OBJETIVO_ML = 0.22     # Margen libre objetivo sobre precio de venta
 
 
 def asegurar_columnas_financieras(conn: sqlite3.Connection) -> None:
-    """Garantiza que las columnas financieras y contables existan en SQLite."""
     cols_cand = [c[1] for c in conn.execute("PRAGMA table_info(zapatos_candidatos)").fetchall()]
     nuevas_cand = {
+        "velocidad_diaria": "REAL DEFAULT 0",
+        "score_ucb": "REAL DEFAULT 0",
+        "tier": "TEXT DEFAULT 'C'",
+        "tallas_seguras_count": "INTEGER DEFAULT 0",
         "stock_publicable_total": "INTEGER DEFAULT 0",
-        "precio_piso_ml": "REAL DEFAULT 0.0",
-        "precio_ml": "REAL DEFAULT 0.0",
-        "utilidad_neta_ml": "REAL DEFAULT 0.0",
-        "fondo_merma_ml": "REAL DEFAULT 0.0",
-        "iva_a_favor_ml": "REAL DEFAULT 0.0",
-        "precio_amazon": "REAL DEFAULT 0.0",
-        "utilidad_neta_amazon": "REAL DEFAULT 0.0",
-        "precio_tiktok": "REAL DEFAULT 0.0",
-        "utilidad_neta_tiktok": "REAL DEFAULT 0.0",
-        "apto_publicar": "INTEGER DEFAULT 0"
+        "precio_piso_ml": "REAL DEFAULT 0",
+        "precio_ml": "REAL DEFAULT 0",
+        "utilidad_neta_ml": "REAL DEFAULT 0",
+        "fondo_merma_ml": "REAL DEFAULT 0",
+        "iva_a_favor_ml": "REAL DEFAULT 0",
+        "precio_amazon": "REAL DEFAULT 0",
+        "utilidad_neta_amazon": "REAL DEFAULT 0",
+        "precio_tiktok": "REAL DEFAULT 0",
+        "utilidad_neta_tiktok": "REAL DEFAULT 0",
+        "apto_publicar": "INTEGER DEFAULT 0",
     }
     for col, tipo in nuevas_cand.items():
         if col not in cols_cand:
@@ -97,97 +71,112 @@ def asegurar_columnas_financieras(conn: sqlite3.Connection) -> None:
 
     cols_hist = [c[1] for c in conn.execute("PRAGMA table_info(historial_stock_21_dias)").fetchall()]
     if "stock_seguro_publicable" not in cols_hist:
-        conn.execute("ALTER TABLE historial_stock_21_dias ADD COLUMN stock_seguro_publicable INTEGER DEFAULT 0;")
-
+        conn.execute(
+            "ALTER TABLE historial_stock_21_dias ADD COLUMN stock_seguro_publicable INTEGER DEFAULT 0;"
+        )
     conn.commit()
 
 
-def calcular_colchon_magico_poisson(stock_fisico: int, velocidad_diaria_sku: float, num_tallas: int) -> int:
-    """
-    Calcula cuántos pares se pueden publicar sin riesgo de quiebre en piso.
-    Descuenta del stock físico la demanda máxima esperada al 95% de confianza (Poisson).
-    """
-    if stock_fisico <= STOCK_MINIMO_PISO:
-        return 0
-    tallas_activas = max(1, num_tallas)
-    lambda_talla = max(0.15, (velocidad_diaria_sku / tallas_activas)) * DIAS_RESPUESTA_COMPRA
-    demanda_max_poisson = math.ceil(lambda_talla + 1.65 * math.sqrt(lambda_talla))
-    colchon_seguridad = max(STOCK_MINIMO_PISO, demanda_max_poisson)
-    return max(0, stock_fisico - colchon_seguridad)
+def estimar_envio_ml(costo_socio: float) -> float:
+    if costo_socio < 350:
+        return 98.0
+    if costo_socio < 650:
+        return 112.0
+    return 128.0
 
 
-def desglosar_iva_incluido(monto_con_iva: float) -> float:
-    """Extrae el monto de IVA (16%) contenido dentro de un precio o costo bruto."""
-    return monto_con_iva - (monto_con_iva / (1.0 + TASA_IVA_MEXICO))
-
-
-def calcular_iva_a_favor_par(precio_venta: float, costo_socio: float, canal_key: str) -> float:
-    """
-    Calcula el saldo de IVA a favor generado en el SAT cuando facturas tu compra
-    en Price Shoes y tus gastos de plataforma (Comisión + Envío + Empaque).
-    NOTA: Este monto NO se suma al efectivo líquido bancario; es un crédito fiscal.
-    """
-    cfg = CANALES[canal_key]
-    comision_bruta = precio_venta * cfg["comision"]
-
-    # 1. El 8% de IVA que te queda por cubrir ante el SAT (porque el otro 8% ya te lo retuvo la plataforma)
-    iva_total_venta = desglosar_iva_incluido(precio_venta)
-    iva_retenido_plataforma = iva_total_venta * 0.50
-    iva_pendiente_sat = iva_total_venta - iva_retenido_plataforma
-
-    # 2. El IVA Acreditable que tú ya pagaste en tus compras y gastos facturados
-    iva_acreditable_total = (
-        desglosar_iva_incluido(costo_socio)
-        + desglosar_iva_incluido(comision_bruta)
-        + desglosar_iva_incluido(cfg["envio"])
-        + desglosar_iva_incluido(COSTO_EMPAQUE)
-    )
-
-    # Si tu IVA acreditable supera al 8% pendiente del SAT, la diferencia es Saldo de IVA a Favor
-    saldo_a_favor = max(0.0, iva_acreditable_total - iva_pendiente_sat)
-    return round(saldo_a_favor, 2)
-
-
-def calcular_precio_efectivo(
-    costo_socio: float,
-    canal_key: str,
-    roi_liquido: float = ROI_EFECTIVO_META
-) -> tuple[float, float, float, float]:
-    """
-    Devuelve: (precio_comercial, efectivo_libre_banco, monto_fondo_merma_2pct, iva_a_favor_sat).
-    Descuenta de golpe toda la retención del SAT (7.76%), comisión, envío, empaque y 2% de merma.
-    """
+def calcular_finanzas_omnicanal(costo_socio: float) -> dict[str, float]:
     if costo_socio <= 0:
-        return 0.0, 0.0, 0.0, 0.0
+        return {
+            "precio_piso_ml": 0.0,
+            "precio_ml": 0.0,
+            "utilidad_neta_ml": 0.0,
+            "fondo_merma_ml": 0.0,
+            "iva_a_favor_ml": 0.0,
+            "precio_amazon": 0.0,
+            "utilidad_neta_amazon": 0.0,
+            "precio_tiktok": 0.0,
+            "utilidad_neta_tiktok": 0.0,
+        }
 
-    cfg = CANALES[canal_key]
-    ganancia_efectivo_meta = costo_socio * roi_liquido
-    salida_efectivo_fija = costo_socio + cfg["envio"] + COSTO_EMPAQUE + ganancia_efectivo_meta
-    porcentaje_retenido = cfg["comision"] + RETENCION_SAT_DIRECTA + FONDO_MERMA
+    envio_ml = estimar_envio_ml(costo_socio)
+    retencion_efectiva_bruta = (RETENCION_IVA_ML + RETENCION_ISR_ML) / (1.0 + IVA_TASA)
+    descuento_total_pct = COMISION_ML_CLASICA + retencion_efectiva_bruta + RESERVA_MERMA_PCT
 
-    precio_crudo = salida_efectivo_fija / (1.0 - porcentaje_retenido)
-    # Redondeo comercial a la decena más cercana terminada en 9 (ej. $949.00)
-    precio_comercial = round(precio_crudo / 10.0) * 10.0 - 1.0
-    if precio_comercial < precio_crudo - 5.0:
-        precio_comercial += 10.0
+    # Precio piso de guerra (punto de equilibrio + merma cubierta + $50 MXN de ganancia mínima)
+    piso_bruto = (costo_socio + envio_ml + 50.0) / (1.0 - descuento_total_pct)
+    precio_piso_ml = math.ceil(piso_bruto / 10.0) * 10.0 - 1.0
 
-    monto_merma = round(precio_comercial * FONDO_MERMA, 2)
-    comision_monto = precio_comercial * cfg["comision"]
-    retencion_sat_monto = precio_comercial * RETENCION_SAT_DIRECTA
+    # Precio óptimo comercial (redondeado a terminación X9.00)
+    optimo_bruto = (costo_socio + envio_ml) / (1.0 - descuento_total_pct - MARGEN_OBJETIVO_ML)
+    precio_ml = max(precio_piso_ml + 30.0, math.ceil(optimo_bruto / 10.0) * 10.0 - 1.0)
 
-    efectivo_libre_banco = round(
-        precio_comercial - (costo_socio + cfg["envio"] + COSTO_EMPAQUE) - comision_monto - retencion_sat_monto - monto_merma,
-        2
+    comision_ml_pesos = precio_ml * COMISION_ML_CLASICA
+    retenciones_pesos = (precio_ml / (1.0 + IVA_TASA)) * (RETENCION_IVA_ML + RETENCION_ISR_ML)
+    fondo_merma_ml = round(precio_ml * RESERVA_MERMA_PCT, 2)
+
+    # Liquidez pura que entra a tu cuenta bancaria descontando el costo del zapato y el fondo de merma
+    utilidad_neta_ml = round(
+        precio_ml - costo_socio - comision_ml_pesos - envio_ml - retenciones_pesos - fondo_merma_ml, 2
     )
-    iva_favor = calcular_iva_a_favor_par(precio_comercial, costo_socio, canal_key)
 
-    return round(precio_comercial, 2), efectivo_libre_banco, monto_merma, iva_favor
+    # IVA acreditable a favor (IVA pagado en Price Shoes + IVA de comisión/envío ML)
+    iva_compras = (costo_socio + comision_ml_pesos + envio_ml) * (IVA_TASA / (1.0 + IVA_TASA))
+    iva_retenido = (precio_ml / (1.0 + IVA_TASA)) * RETENCION_IVA_ML
+    iva_trasladado = precio_ml * (IVA_TASA / (1.0 + IVA_TASA))
+    iva_a_favor_ml = round(max(0.0, (iva_compras + iva_retenido) - iva_trasladado), 2)
+
+    # Amazon y TikTok Shop
+    precio_amazon = math.ceil((precio_ml * 0.98) / 10.0) * 10.0 - 1.0
+    utilidad_neta_amazon = round(
+        precio_amazon * (1.0 - COMISION_AMAZON - retencion_efectiva_bruta - RESERVA_MERMA_PCT)
+        - costo_socio
+        - envio_ml,
+        2,
+    )
+
+    precio_tiktok = math.ceil((precio_ml * 0.92) / 10.0) * 10.0 - 1.0
+    utilidad_neta_tiktok = round(
+        precio_tiktok * (1.0 - COMISION_TIKTOK - retencion_efectiva_bruta - RESERVA_MERMA_PCT)
+        - costo_socio
+        - 95.0,
+        2,
+    )
+
+    return {
+        "precio_piso_ml": round(precio_piso_ml, 2),
+        "precio_ml": round(precio_ml, 2),
+        "utilidad_neta_ml": utilidad_neta_ml,
+        "fondo_merma_ml": fondo_merma_ml,
+        "iva_a_favor_ml": iva_a_favor_ml,
+        "precio_amazon": round(precio_amazon, 2),
+        "utilidad_neta_amazon": utilidad_neta_amazon,
+        "precio_tiktok": round(precio_tiktok, 2),
+        "utilidad_neta_tiktok": utilidad_neta_tiktok,
+    }
 
 
-def ejecutar_motor_financiero() -> None:
-    print("=" * 84)
-    print("💵 PASO 5: MOTOR FINANCIERO (FLUJO DE EFECTIVO PURO + AUDITORÍA DE IVA A FAVOR)")
-    print("=" * 84)
+def calcular_stock_seguro_talla(stock_fisico: int, lambda_talla: float) -> int:
+    """
+    Aplica el Doble Blindaje:
+    1. Si en tienda hay <= 5 pares (PISO_FANTASMA_TALLA), devuelve 0 de inmediato.
+    2. Si hay > 5 pares, resta los 5 pares de devoluciones/exhibición Y ADEMÁS resta
+       el colchón superior de Poisson al 95% de confianza.
+    """
+    if stock_fisico <= PISO_FANTASMA_TALLA:
+        return 0
+
+    lam = max(LAMBDA_PRIOR_TALLA, float(lambda_talla))
+    colchon_poisson = math.ceil(lam * TAU_DIAS + Z_CONF_95 * math.sqrt(lam * TAU_DIAS))
+    colchon_total = PISO_FANTASMA_TALLA + max(1, colchon_poisson)
+
+    return max(0, int(stock_fisico) - colchon_total)
+
+
+def ejecutar_motor_doble_blindaje() -> None:
+    print("=" * 92)
+    print("🛡️ PASO 5: MOTOR DE DOBLE BLINDAJE (PISO > 5 PARES POR TALLA + POISSON + BEST-SELLERS)")
+    print("=" * 92)
 
     if not RUTA_BD.exists():
         print(f"❌ No existe la base de datos en {RUTA_BD}.")
@@ -197,46 +186,147 @@ def ejecutar_motor_financiero() -> None:
     conn.execute("PRAGMA journal_mode=WAL;")
     asegurar_columnas_financieras(conn)
 
-    skus_auditados = conn.execute("""
-        SELECT id_ps, nombre_modelo, costo_socio, velocidad_diaria, stock_total_anterior, tier
-        FROM zapatos_candidatos
-        WHERE costo_socio > 0
-    """).fetchall()
+    candidatos = conn.execute(
+        "SELECT id_ps, nombre_modelo, costo_socio, stock_total_anterior, velocidad_diaria FROM zapatos_candidatos"
+    ).fetchall()
 
-    print(f"🔎 Calculando liquidez bancaria real e IVA a favor para {len(skus_auditados)} SKUs...\n")
+    # 1. Calcular rotación real por SKU y por talla desde el historial de lecturas
+    metricas_sku: list[dict] = []
 
-    for id_ps, nombre, costo, vel, stock_tot, tier in skus_auditados:
-        vel = vel if vel and vel > 0 else 0.5
+    for id_ps, nombre, costo, stock_ant, vel_actual in candidatos:
+        id_str = str(id_ps)
+        costo_f = float(costo or 0.0)
+        stock_f = int(stock_ant or 0)
 
-        tallas_actuales = conn.execute("""
-            SELECT rowid, talla, stock_vallejo
+        lecturas = conn.execute(
+            """
+            SELECT fecha, talla, stock_vallejo
             FROM historial_stock_21_dias
             WHERE id_ps = ?
-        """, (id_ps,)).fetchall()
+            ORDER BY talla, fecha ASC
+            """,
+            (id_str,),
+        ).fetchall()
 
-        num_tallas_con_stock = sum(1 for _, _, s in tallas_actuales if s > 0)
-        stock_publicable_acumulado = 0
+        # Agrupar lecturas por talla para medir caídas de stock (ventas en Vallejo)
+        por_talla: dict[str, list[tuple[str, int]]] = {}
+        fechas_set: set[str] = set()
+        for fecha_s, talla_s, stk_v in lecturas:
+            t_key = str(talla_s)
+            por_talla.setdefault(t_key, []).append((str(fecha_s), int(stk_v or 0)))
+            fechas_set.add(str(fecha_s))
 
-        for rowid, talla, stock_val in tallas_actuales:
-            seguro = calcular_colchon_magico_poisson(stock_val, vel, num_tallas_con_stock)
-            stock_publicable_acumulado += seguro
-            conn.execute("""
-                UPDATE historial_stock_21_dias
-                SET stock_seguro_publicable = ?
-                WHERE rowid = ?
-            """, (seguro, rowid))
+        ultima_fecha = max(fechas_set) if fechas_set else None
+        num_intervalos = max(1, len(fechas_set) - 1)
 
-        p_piso_ml, u_piso_ml, _, _ = calcular_precio_efectivo(costo, "mercado_libre", ROI_EFECTIVO_PISO)
-        p_ml, u_ml, merma_ml, iva_fav_ml = calcular_precio_efectivo(costo, "mercado_libre", ROI_EFECTIVO_META)
-        p_amz, u_amz, _, _ = calcular_precio_efectivo(costo, "amazon", ROI_EFECTIVO_META)
-        p_tk, u_tk, _, _ = calcular_precio_efectivo(costo, "tiktok_shop", ROI_EFECTIVO_META)
+        ventas_totales_detectadas = 0
+        stock_publicable_sku = 0
+        tallas_seguras_sku = 0
 
-        ref_competencia_x2 = costo * 2.0
-        apto = 1 if (stock_publicable_acumulado >= 3 and u_ml >= 45.0 and tier != 'Z') else 0
+        for t_key, serie in por_talla.items():
+            caidas_talla = 0
+            for i in range(1, len(serie)):
+                delta = serie[i - 1][1] - serie[i][1]
+                if delta > 0:
+                    caidas_talla += delta
+            ventas_totales_detectadas += caidas_talla
 
-        conn.execute("""
+            # Estimador Bayesiano Gamma-Poisson por talla
+            lambda_talla = (0.35 + caidas_talla) / (1.0 + num_intervalos * 0.5)
+
+            # Aplicar blindaje a la última lectura de esta talla
+            fecha_ult_talla, stock_ult_talla = serie[-1]
+            if fecha_ult_talla == ultima_fecha:
+                seguro_talla = calcular_stock_seguro_talla(stock_ult_talla, lambda_talla)
+                stock_publicable_sku += seguro_talla
+                if seguro_talla > 0:
+                    tallas_seguras_sku += 1
+
+                conn.execute(
+                    """
+                    UPDATE historial_stock_21_dias
+                    SET stock_seguro_publicable = ?
+                    WHERE id_ps = ? AND talla = ? AND fecha = ?
+                    """,
+                    (seguro_talla, id_str, t_key, ultima_fecha),
+                )
+
+        # Velocidad diaria Bayesiana + Score UCB (prioriza best-sellers comprobados y lotes profundos)
+        alpha_post = 1.2 + ventas_totales_detectadas + (min(stock_f, 120) * 0.025)
+        beta_post = 1.0 + (num_intervalos * 0.5)
+        lambda_bayes = alpha_post / beta_post
+        score_ucb = lambda_bayes + Z_CONF_95 * (math.sqrt(alpha_post) / beta_post)
+
+        velocidad_final = round(max(float(vel_actual or 0.0), lambda_bayes), 2) if stock_f > 0 else 0.0
+
+        metricas_sku.append({
+            "id_ps": id_str,
+            "nombre": str(nombre or ""),
+            "costo": costo_f,
+            "stock_fisico": stock_f,
+            "velocidad": velocidad_final,
+            "score_ucb": score_ucb,
+            "stock_publicable_total": stock_publicable_sku,
+            "tallas_seguras_count": tallas_seguras_sku,
+        })
+
+    # 2. Clasificar en Tiers (S = Top 15% Best-Sellers, A = Siguiente 25%, B = Resto con stock, C = Sin tracción)
+    con_traccion = sorted(
+        [m for m in metricas_sku if m["stock_publicable_total"] > 0 and m["costo"] > 0],
+        key=lambda x: (x["score_ucb"], x["stock_publicable_total"]),
+        reverse=True,
+    )
+    n_activos = len(con_traccion)
+    corte_s = max(1, int(n_activos * 0.30))
+    corte_a = max(2, int(n_activos * 0.70))
+
+    mapa_tier: dict[str, str] = {}
+    for rank_idx, item in enumerate(con_traccion):
+        if rank_idx < corte_s:
+            mapa_tier[item["id_ps"]] = "S"
+        elif rank_idx < corte_a:
+            mapa_tier[item["id_ps"]] = "A"
+        else:
+            mapa_tier[item["id_ps"]] = "B"
+
+    # 3. Guardar resultados y autorizar SOLO los Best-Sellers con Stock Ultra-Seguro
+    aptos_total = 0
+    pares_seguros_totales = 0
+
+    for m in metricas_sku:
+        id_str = m["id_ps"]
+        tier = mapa_tier.get(id_str, "B" if m["stock_fisico"] > 0 else "C")
+        fin = calcular_finanzas_omnicanal(m["costo"])
+
+        # Regla estricta para publicar este mes:
+        # 1) Costo socio auditado y utilidad bancaria positiva
+        # 2) Al menos MIN_TALLAS_SEGURAS (2+) tallas que superen los 5 pares fantasma + Poisson
+        # 3) Al menos MIN_PARES_PUBLICABLES (6+) pares libres totales después del descuento
+        # 4) Pertenecer a los productos estrella más vendidos (Tier S o Tier A)
+        es_apto = (
+            1
+            if (
+                m["costo"] > 0
+                and fin["utilidad_neta_ml"] > 0
+                and m["tallas_seguras_count"] >= MIN_TALLAS_SEGURAS
+                and m["stock_publicable_total"] >= MIN_PARES_PUBLICABLES
+                and tier in TIERS_PERMITIDOS
+            )
+            else 0
+        )
+
+        if es_apto == 1:
+            aptos_total += 1
+            pares_seguros_totales += m["stock_publicable_total"]
+
+        conn.execute(
+            """
             UPDATE zapatos_candidatos
-            SET stock_publicable_total = ?,
+            SET velocidad_diaria = ?,
+                score_ucb = ?,
+                tier = ?,
+                tallas_seguras_count = ?,
+                stock_publicable_total = ?,
                 precio_piso_ml = ?,
                 precio_ml = ?,
                 utilidad_neta_ml = ?,
@@ -248,26 +338,35 @@ def ejecutar_motor_financiero() -> None:
                 utilidad_neta_tiktok = ?,
                 apto_publicar = ?
             WHERE id_ps = ?
-        """, (
-            stock_publicable_acumulado,
-            p_piso_ml, p_ml, u_ml, merma_ml, iva_fav_ml,
-            p_amz, u_amz,
-            p_tk, u_tk,
-            apto, id_ps
-        ))
-
-        estado_str = "✅ APTO PARA PUBLICAR" if apto else "⏸️ EN OBSERVACIÓN / POCO STOCK"
-        print(f"👞 SKU {id_ps} ({nombre}) | Costo Socio: ${costo:,.2f} | {estado_str}")
-        print(f"   🛡️ Stock Vallejo: {stock_tot} pares -> Colchón Mágico Publicable: {stock_publicable_acumulado} pares")
-        print(f"   🎯 Ref. Competencia (Costo x2): ${ref_competencia_x2:,.2f} | Piso Guerra ML: ${p_piso_ml:,.2f} (Efectivo: ${u_piso_ml:,.2f})")
-        print(f"   🛒 Mercado Libre : ${p_ml:,.2f} -> 💵 Efectivo en Banco: ${u_ml:,.2f} | 🛡️ Merma 2%: ${merma_ml:,.2f} | 🏛️ Bono IVA a Favor SAT: +${iva_fav_ml:,.2f}")
-        print(f"   📦 Amazon México : ${p_amz:,.2f} -> 💵 Efectivo en Banco: ${u_amz:,.2f}")
-        print(f"   🎵 TikTok Shop   : ${p_tk:,.2f} -> 💵 Efectivo en Banco: ${u_tk:,.2f}\n")
+            """,
+            (
+                m["velocidad"],
+                round(m["score_ucb"], 3),
+                tier,
+                m["tallas_seguras_count"],
+                m["stock_publicable_total"],
+                fin["precio_piso_ml"],
+                fin["precio_ml"],
+                fin["utilidad_neta_ml"],
+                fin["fondo_merma_ml"],
+                fin["iva_a_favor_ml"],
+                fin["precio_amazon"],
+                fin["utilidad_neta_amazon"],
+                fin["precio_tiktok"],
+                fin["utilidad_neta_tiktok"],
+                es_apto,
+                id_str,
+            ),
+        )
 
     conn.commit()
     conn.close()
-    print("✅ ¡Flujo de efectivo puro y crédito fiscal de IVA a favor guardados en SQLite!")
+
+    print(f"✅ Regla de Exclusión Física activa: Tallas con <= {PISO_FANTASMA_TALLA} pares fueron puestas en 0.")
+    print(f"✅ Filtro de Curva y Rotación: Mínimo {MIN_TALLAS_SEGURAS} tallas seguras y >= {MIN_PARES_PUBLICABLES} pares libres (Solo Tiers {TIERS_PERMITIDOS}).")
+    print(f"🏆 SKUs Best-Sellers Aptos este mes: {aptos_total} modelos élite ({pares_seguros_totales:,} pares ultra-seguros).")
+    print("=" * 92)
 
 
 if __name__ == "__main__":
-    ejecutar_motor_financiero()
+    ejecutar_motor_doble_blindaje()

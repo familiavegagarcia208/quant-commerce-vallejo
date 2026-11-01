@@ -14,7 +14,7 @@ import streamlit as st
 RUTA_BD = Path("data/zapateria_vallejo.db")
 DIR_CATALOGO = Path("data/catalogo_listo")
 
-UMBRAL_POISSON = 3
+UMBRAL_POISSON = 6  # Piso > 5 pares por talla + Poisson (Best-Sellers S/A)
 CONFIANZA_PCT = 95
 MERMA_PCT = 2
 MAX_OPCIONES_SELECTOR = 2000
@@ -23,7 +23,7 @@ MAX_OPCIONES_SELECTOR = 2000
 VISTA_TODO = "📊 Todo el Catálogo"
 VISTA_CON_COSTO = "🔍 Con Costo Socio"
 VISTA_PARES_SEGUROS = "🛡️ Con Pares Seguros"
-VISTA_APTOS = f"✅ Aptos para Publicar (Poisson >= {UMBRAL_POISSON})"
+VISTA_APTOS = f"✅ 🔥 Best-Sellers Stock Blindado (>5/talla + Poisson)"
 
 COLS_NUMERICAS = [
     "costo_socio", "stock_total_anterior", "velocidad_diaria",
@@ -226,7 +226,7 @@ total_efectivo_ml = float(df_catalogo["efectivo_total_ml"].sum())
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Universo Catálogo", f"{total_skus:,}")
 k2.metric("SKUs Auditados", f"{skus_auditados:,}", f"{skus_auditados / total_skus * 100:.1f}% cobertura", delta_color="off")
-k3.metric("Aptos para Publicar", f"{skus_aptos:,}", "Superan Colchón Poisson", delta_color="off")
+k3.metric("Aptos para Publicar", f"{skus_aptos:,}", "Piso >5/talla + Tier S/A", delta_color="off")
 k4.metric("Pares Seguros", f"{total_pares_seguros:,}", f"Repartidos en {skus_con_seguros} SKUs", delta_color="off")
 k5.metric("Efectivo Potencial (ML)", f"${total_efectivo_ml:,.0f}", "Si se vende todo", delta_color="off")
 
