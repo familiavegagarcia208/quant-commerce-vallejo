@@ -1,451 +1,1020 @@
-"""Quant-Commerce Vallejo: Panel Ejecutivo Omnicanal (Simple, Veloz y Directo)."""
+"""
+=========================================================================================
+PASO 4: POWER BI ENTERPRISE CANVAS - QUANT-COMMERCE VALLEJO
+=========================================================================================
+Diseño de Inteligencia de Negocios (BI) en cuadrícula de mosaicos con:
+- 10 Segmentadores Generales (Género, Categoría, Color, Rango de Tallas, Multi-Talla,
+  Rango de Costo, Rango de Precio, Utilidad/ROI, Tier y Nivel de Stock).
+- Lienzo visual con Treemap, Heatmap de Tallas, Curva de Bodega, Cuadrante UCB y Cascada.
+- Matriz con formato condicional (Data Bars) y editor rápido de publicación.
+=========================================================================================
+"""
 from __future__ import annotations
 
+import re
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-# ===========================================================================
-# 1. CONFIGURACIÓN BÁSICA
-# ===========================================================================
 RUTA_BD = Path("data/zapateria_vallejo.db")
 DIR_CATALOGO = Path("data/catalogo_listo")
-
-UMBRAL_POISSON = 6  # Piso > 5 pares por talla + Poisson (Best-Sellers S/A)
-CONFIANZA_PCT = 95
-MERMA_PCT = 2
-MAX_OPCIONES_SELECTOR = 2000
-
-# Opciones del botón superior (Filtro Maestro)
-VISTA_TODO = "📊 Todo el Catálogo"
-VISTA_CON_COSTO = "🔍 Con Costo Socio"
-VISTA_PARES_SEGUROS = "🛡️ Con Pares Seguros"
-VISTA_APTOS = f"✅ 🔥 Best-Sellers Stock Blindado (>5/talla + Poisson)"
-
-COLS_NUMERICAS = [
-    "costo_socio", "stock_total_anterior", "velocidad_diaria",
-    "stock_publicable_total", "precio_piso_ml", "precio_ml",
-    "utilidad_neta_ml", "fondo_merma_ml", "iva_a_favor_ml",
-    "precio_amazon", "utilidad_neta_amazon", "precio_tiktok",
-    "utilidad_neta_tiktok", "apto_publicar", "estudio_foto_listo",
-]
+PISO_FANTASMA_TALLA = 5
 
 st.set_page_config(
-    page_title="Quant-Commerce Vallejo",
-    page_icon="👞",
+    page_title="Quant-Commerce Vallejo · Power BI Canvas",
+    page_icon="📊",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# ---------------------------------------------------------------------------
+# ESTILOS CSS: TEMA POWER BI DARK CANVAS & TILES
+# ---------------------------------------------------------------------------
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 2rem; padding-bottom: 3rem;}
-    [data-testid="stMetric"] {
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(128,128,128,.25);
-        border-radius: 8px;
-        padding: 14px 16px;
+    .block-container {
+        padding-top: 0.8rem;
+        padding-bottom: 1.5rem;
+        padding-left: 1.5rem;
+        padding-right: 1.5rem;
     }
-    [data-testid="stMetricLabel"] {font-size: .85rem; opacity: .8;}
+    /* Tarjetas KPI estilo Power BI */
+    div[data-testid="stMetric"] {
+        background: linear-gradient(145deg, #111827 0%, #1f2937 100%);
+        border: 1px solid #374151;
+        border-top: 4px solid #3b82f6;
+        padding: 10px 14px;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+    }
+    div[data-testid="stMetricLabel"] > div {
+        color: #9ca3af !important;
+        font-size: 0.78rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 600 !important;
+    }
+    div[data-testid="stMetricValue"] > div {
+        color: #f9fafb !important;
+        font-size: 1.45rem !important;
+        font-weight: 700 !important;
+    }
+    /* Encabezados de mosaicos */
+    .pbi-tile-header {
+        font-size: 0.92rem;
+        font-weight: 700;
+        color: #e5e7eb;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        border-bottom: 1px solid #374151;
+        padding-bottom: 6px;
+        margin-bottom: 8px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# ===========================================================================
-# 2. FUNCIONES DE DATOS (CON CACHÉ AUTOMÁTICA)
-# ===========================================================================
-@st.cache_data(show_spinner="Cargando catálogo…", max_entries=2)
-def cargar_catalogo(ruta_bd: str, mtime: float) -> pd.DataFrame:
-    """Lee el catálogo de SQLite y agrega el resumen de tallas seguras de cada SKU."""
-    with sqlite3.connect(ruta_bd) as conn:
-        df = pd.read_sql("SELECT * FROM zapatos_candidatos", conn)
+def normalizar_talla_mx(valor_str: str | float) -> str:
+    m = re.findall(r"\d+(?:\.\d+)?", str(valor_str))
+    if not m:
+        return str(valor_str).strip()
+    num = float(m[0])
+    if 2.0 <= num <= 11.5:
+        num += 20.0
+    return f"{num:.1f}"
 
-        # Consulta rápida para saber qué tallas tienen stock seguro en la última fecha
-        sql_tallas = """
-            SELECT CAST(h.id_ps AS TEXT) AS id_ps,
-                   CAST(h.talla AS TEXT) AS talla,
-                   CAST(h.stock_seguro_publicable AS INTEGER) AS pares
-            FROM historial_stock_21_dias h
-            INNER JOIN (
-                SELECT id_ps, MAX(fecha) AS max_fecha
-                FROM historial_stock_21_dias
-                GROUP BY id_ps
-            ) u ON h.id_ps = u.id_ps AND h.fecha = u.max_fecha
-            WHERE COALESCE(h.stock_seguro_publicable, 0) > 0
-            ORDER BY CAST(h.talla AS REAL)
+
+def clasificar_categoria(nombre: str) -> str:
+    n = str(nombre).lower()
+    if any(k in n for k in ["tenis", "sneaker", "runner", "running", "deportivo", "skate", "gym"]):
+        return "Tenis / Deportivo"
+    if any(k in n for k in ["bota", "botin", "botín", "industrial", "tactica", "táctica", "hiking", "montaña"]):
+        return "Bota / Botín"
+    if any(k in n for k in ["sandalia", "huarache", "chancla", "slide", "mule", "pantufla", "descanso"]):
+        return "Sandalia / Confort"
+    if any(k in n for k in ["escolar", "vestir", "oxford", "derby", "mocasin", "mocasín", "tacon", "tacón", "formal"]):
+        return "Formal / Escolar"
+    return "Casual / Urbano"
+
+
+def clasificar_color(nombre: str) -> str:
+    n = str(nombre).lower()
+    mapa_colores = [
+        ("Negro", ["negro", "black", "onix", "ónix", "charcoal"]),
+        ("Blanco", ["blanco", "white", "hueso", "ivory", "perla", "crema"]),
+        ("Café / Miel", ["cafe", "café", "miel", "camel", "tan", "tabaco", "chocolate", "brown", "arena", "beige", "nude"]),
+        ("Azul / Marino", ["azul", "marino", "navy", "blue", "mezclilla", "denim", "celeste"]),
+        ("Rojo / Vino", ["rojo", "vino", "tinto", "red", "burgundy", "coral", "guinda"]),
+        ("Gris / Plata", ["gris", "plata", "silver", "grey", "gray", "plomo", "oxford"]),
+        ("Rosa / Lila", ["rosa", "pink", "fiusha", "fucsia", "lila", "morado", "violeta", "oro rosa"]),
+        ("Verde / Olivo", ["verde", "olivo", "militar", "green", "menta", "kaki"]),
+    ]
+    for etiqueta, palabras in mapa_colores:
+        if any(p in n for p in palabras):
+            return etiqueta
+    return "Multicolor / Clásico"
+
+
+def clasificar_genero(nombre: str, max_talla: float, min_talla: float) -> str:
+    n = str(nombre).lower()
+    if any(k in n for k in ["niño", "niña", "infantil", "kids", "junior", "escolar", "bebé", "bebe"]) or (0 < max_talla <= 21.5):
+        return "Infantil / Juvenil"
+    if any(k in n for k in ["caballero", "hombre", "varon", "varón", "men"]):
+        return "Hombre"
+    if any(k in n for k in ["dama", "mujer", "women", "tacon", "tacón", "plataforma", "ballet", "zapatilla"]):
+        return "Mujer"
+    if max_talla >= 27.0 or min_talla >= 25.0:
+        return "Hombre"
+    if 21.5 <= max_talla <= 26.5:
+        return "Mujer"
+    return "Unisex"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cargar_modelo_bi() -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not RUTA_BD.exists():
+        return pd.DataFrame(), pd.DataFrame()
+
+    conn = sqlite3.connect(RUTA_BD, timeout=15)
+    df_cand = pd.read_sql_query("SELECT * FROM zapatos_candidatos", conn)
+    df_hist = pd.read_sql_query(
         """
-        try:
-            df_tallas = pd.read_sql(sql_tallas, conn)
-        except Exception:
-            df_tallas = pd.DataFrame()
-
-    if df.empty:
-        return df
-
-    # Asegurar que las columnas numéricas no tengan nulos ni texto
-    for col in COLS_NUMERICAS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-        else:
-            df[col] = 0.0
-
-    df["id_ps"] = df["id_ps"].astype(str)
-    df["tier"] = df["tier"].fillna("B").astype(str) if "tier" in df.columns else "B"
-    df["nombre_modelo"] = df["nombre_modelo"].fillna("").astype(str)
-    if "url_real" not in df.columns:
-        df["url_real"] = None
-
-    df["ultima_sincronizacion"] = (
-        pd.to_datetime(df["ultima_sincronizacion"], errors="coerce")
-        if "ultima_sincronizacion" in df.columns
-        else pd.NaT
+        SELECT CAST(id_ps AS TEXT) AS id_ps,
+               CAST(talla AS TEXT) AS talla,
+               stock_vallejo,
+               stock_seguro_publicable,
+               fecha
+        FROM historial_stock_21_dias
+        """,
+        conn,
     )
+    conn.close()
 
-    # Armar texto de tallas seguras por modelo: ej. "T23 (4p) · T24 (6p)"
-    if not df_tallas.empty:
-        df_tallas["texto"] = "T" + df_tallas["talla"] + " (" + df_tallas["pares"].astype(str) + "p)"
-        mapa_tallas = df_tallas.groupby("id_ps", sort=False)["texto"].apply(" · ".join).to_dict()
-        df["tallas_seguras"] = df["id_ps"].map(mapa_tallas).fillna("—")
+    if df_cand.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df_cand["id_ps"] = df_cand["id_ps"].astype(str)
+
+    cols_num = {
+        "costo_socio": 0.0,
+        "stock_total_anterior": 0,
+        "velocidad_diaria": 0.0,
+        "score_ucb": 0.0,
+        "tallas_seguras_count": 0,
+        "stock_publicable_total": 0,
+        "precio_piso_ml": 0.0,
+        "precio_ml": 0.0,
+        "utilidad_neta_ml": 0.0,
+        "fondo_merma_ml": 0.0,
+        "iva_a_favor_ml": 0.0,
+        "precio_amazon": 0.0,
+        "utilidad_neta_amazon": 0.0,
+        "precio_tiktok": 0.0,
+        "utilidad_neta_tiktok": 0.0,
+        "apto_publicar": 0,
+    }
+    for col, val_def in cols_num.items():
+        if col not in df_cand.columns:
+            df_cand[col] = val_def
+        else:
+            df_cand[col] = pd.to_numeric(df_cand[col], errors="coerce").fillna(val_def)
+
+    df_cand["stock_fisico"] = df_cand["stock_total_anterior"].astype(int)
+    df_cand["tier"] = df_cand["tier"].fillna("B").astype(str) if "tier" in df_cand.columns else "B"
+
+    # Procesar última lectura por talla
+    if not df_hist.empty:
+        df_hist["stock_vallejo"] = pd.to_numeric(df_hist["stock_vallejo"], errors="coerce").fillna(0).astype(int)
+        if "stock_seguro_publicable" not in df_hist.columns:
+            df_hist["stock_seguro_publicable"] = (df_hist["stock_vallejo"] - 6).clip(lower=0)
+        else:
+            df_hist["stock_seguro_publicable"] = (
+                pd.to_numeric(df_hist["stock_seguro_publicable"], errors="coerce").fillna(0).astype(int)
+            )
+        df_hist["talla_norm"] = df_hist["talla"].apply(normalizar_talla_mx)
+        df_tallas = (
+            df_hist.sort_values("fecha")
+            .drop_duplicates(subset=["id_ps", "talla_norm"], keep="last")
+            .copy()
+        )
+        df_tallas["talla_num"] = pd.to_numeric(df_tallas["talla_norm"], errors="coerce").fillna(24.0)
+        rangos = df_tallas.groupby("id_ps")["talla_num"].agg(["min", "max"]).to_dict("index")
+
+        tallas_seg = df_tallas[df_tallas["stock_seguro_publicable"] > 0].copy()
+        tallas_seg["etiqueta_t"] = (
+            tallas_seg["talla_norm"] + " (" + tallas_seg["stock_seguro_publicable"].astype(str) + ")"
+        )
+        mapa_detalle_seg = tallas_seg.groupby("id_ps")["etiqueta_t"].apply(", ".join).to_dict()
+
+        tallas_fis = df_tallas[df_tallas["stock_vallejo"] > 0].copy()
+        mapa_rango_txt = (
+            tallas_fis.groupby("id_ps")["talla_num"]
+            .agg(lambda s: f"{s.min():.1f} - {s.max():.1f} MX" if len(s) > 1 else f"{s.min():.1f} MX")
+            .to_dict()
+        )
     else:
-        df["tallas_seguras"] = "—"
+        df_tallas = pd.DataFrame(
+            columns=["id_ps", "talla", "talla_norm", "talla_num", "stock_vallejo", "stock_seguro_publicable"]
+        )
+        rangos = {}
+        mapa_detalle_seg = {}
+        mapa_rango_txt = {}
 
-    # Columnas calculadas útiles para el negocio
-    vel = df["velocidad_diaria"].where(df["velocidad_diaria"] > 0)
-    df["dias_cobertura"] = (df["stock_total_anterior"] / vel).round(1)
-    df["ref_competencia_x2"] = df["costo_socio"] * 2.0
-    df["efectivo_total_ml"] = df["stock_publicable_total"] * df["utilidad_neta_ml"]
+    # Clasificación general (Categoría, Género, Color, Rango Tallas)
+    generos, categorias, colores, min_tallas, max_tallas = [], [], [], [], []
+    for _, row in df_cand.iterrows():
+        sku_s = str(row["id_ps"])
+        nom_s = str(row.get("nombre_modelo", ""))
+        r_info = rangos.get(sku_s, {"min": 22.0, "max": 26.0})
+        min_tallas.append(float(r_info["min"]))
+        max_tallas.append(float(r_info["max"]))
 
-    # Columnas auxiliares para el buscador y los menús desplegables
-    pares = df["stock_publicable_total"].astype(int).astype(str)
-    df["_etiqueta_menu"] = df["id_ps"] + " · " + df["nombre_modelo"] + " (" + pares + " pares seguros)"
-    df["_texto_busqueda"] = (
-        df["id_ps"] + " " + df["nombre_modelo"] + " " + df["tallas_seguras"]
+        g_db = row.get("genero") if "genero" in df_cand.columns else None
+        c_db = row.get("tipo_calzado") if "tipo_calzado" in df_cand.columns else None
+
+        generos.append(
+            g_db if pd.notna(g_db) and str(g_db).strip() else clasificar_genero(nom_s, r_info["max"], r_info["min"])
+        )
+        categorias.append(c_db if pd.notna(c_db) and str(c_db).strip() else clasificar_categoria(nom_s))
+        colores.append(clasificar_color(nom_s))
+
+    df_cand["genero"] = generos
+    df_cand["categoria"] = categorias
+    df_cand["color"] = colores
+    df_cand["talla_min"] = min_tallas
+    df_cand["talla_max"] = max_tallas
+    df_cand["curva_tallas_txt"] = df_cand["id_ps"].map(lambda x: mapa_rango_txt.get(str(x), "S/D"))
+    df_cand["tallas_seguras_txt"] = df_cand["id_ps"].map(lambda x: mapa_detalle_seg.get(str(x), "Ninguna"))
+
+    # Métricas Financieras de BI
+    df_cand["utilidad_potencial_lote"] = df_cand["utilidad_neta_ml"] * df_cand["stock_publicable_total"]
+    df_cand["capital_requerido_lote"] = df_cand["costo_socio"] * df_cand["stock_publicable_total"]
+    df_cand["ventas_brutas_lote"] = df_cand["precio_ml"] * df_cand["stock_publicable_total"]
+    df_cand["margen_neto_pct"] = (
+        (df_cand["utilidad_neta_ml"] / df_cand["precio_ml"].replace(0, pd.NA)) * 100
+    ).fillna(0.0).round(1)
+    df_cand["roi_costo_pct"] = (
+        (df_cand["utilidad_neta_ml"] / df_cand["costo_socio"].replace(0, pd.NA)) * 100
+    ).fillna(0.0).round(1)
+    df_cand["fotos_listas"] = df_cand["id_ps"].apply(
+        lambda x: (DIR_CATALOGO / str(x) / "03_ficha_beneficios.jpg").exists()
+    )
+    df_cand["apto_bool"] = df_cand["apto_publicar"].astype(int) == 1
+
+    # Campo unificado de búsqueda para el filtro multitérmino
+    df_cand["blob_busqueda"] = (
+        df_cand["id_ps"]
+        + " "
+        + df_cand["nombre_modelo"].astype(str)
+        + " "
+        + df_cand["genero"]
+        + " "
+        + df_cand["categoria"]
+        + " "
+        + df_cand["color"]
+        + " "
+        + df_cand["tier"]
+        + " "
+        + df_cand["tallas_seguras_txt"]
     ).str.lower()
 
-    # Ordenar una sola vez: primero los que tienen más pares seguros y mayor rotación
-    return df.sort_values(
-        ["apto_publicar", "stock_publicable_total", "velocidad_diaria"],
-        ascending=False,
-        ignore_index=True,
-    )
+    return df_cand, df_tallas
 
 
-@st.cache_data(show_spinner=False, max_entries=256)
-def cargar_tallas_sku(ruta_bd: str, mtime: float, sku: str) -> pd.DataFrame:
-    """Devuelve la tabla de tallas de la última lectura de un SKU."""
-    sql = """
-        SELECT talla, stock_vallejo, stock_seguro_publicable
-        FROM historial_stock_21_dias
-        WHERE id_ps = ?
-          AND fecha = (SELECT MAX(fecha) FROM historial_stock_21_dias WHERE id_ps = ?)
-    """
-    with sqlite3.connect(ruta_bd) as conn:
-        df_h = pd.read_sql(sql, conn, params=(sku, sku))
+df_raw, df_tallas = cargar_modelo_bi()
 
-    if df_h.empty:
-        return df_h
-
-    df_h["stock_vallejo"] = pd.to_numeric(df_h["stock_vallejo"], errors="coerce").fillna(0).astype(int)
-    df_h["stock_seguro_publicable"] = (
-        pd.to_numeric(df_h["stock_seguro_publicable"], errors="coerce").fillna(0).astype(int)
-    )
-    df_h["talla"] = df_h["talla"].astype(str)
-    df_h["talla_num"] = pd.to_numeric(df_h["talla"], errors="coerce")
-    return df_h.sort_values(["talla_num", "talla"], ignore_index=True)
-
-
-def obtener_fotos_sku(sku: str) -> list[Path]:
-    """Busca las imágenes .jpg o .png dentro de la carpeta del SKU."""
-    carpeta = DIR_CATALOGO / str(sku)
-    if not carpeta.is_dir():
-        return []
-    return sorted(p for p in carpeta.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"})
-
-
-def filtrar_datos(
-    df: pd.DataFrame, vista: str, busqueda: str, tiers: list[str], vel_min: float
-) -> pd.DataFrame:
-    """Aplica los filtros elegidos por el usuario."""
-    mask = pd.Series(True, index=df.index)
-
-    if vista == VISTA_CON_COSTO:
-        mask &= df["costo_socio"] > 0
-    elif vista == VISTA_PARES_SEGUROS:
-        mask &= df["stock_publicable_total"] > 0
-    elif vista == VISTA_APTOS:
-        mask &= df["apto_publicar"] == 1
-
-    if tiers:
-        mask &= df["tier"].isin(tiers)
-
-    if vel_min > 0:
-        mask &= df["velocidad_diaria"] >= vel_min
-
-    texto = busqueda.strip().lower()
-    if texto:
-        mask &= df["_texto_busqueda"].str.contains(texto, regex=False, na=False)
-
-    return df.loc[mask]
-
-
-# ===========================================================================
-# 3. CARGA INICIAL Y ENCABEZADO
-# ===========================================================================
-if not RUTA_BD.exists():
-    st.error(f"No se encontró la base de datos en `{RUTA_BD}`.")
+if df_raw.empty:
+    st.error("⚠️ No se encontraron datos en `data/zapateria_vallejo.db`.")
     st.stop()
 
-MTIME_BD = RUTA_BD.stat().st_mtime
-df_catalogo = cargar_catalogo(str(RUTA_BD), MTIME_BD)
-
-if df_catalogo.empty:
-    st.warning("La base de datos está vacía.")
-    st.stop()
-
-st.title("👞 Quant-Commerce Vallejo · Suite Ejecutiva Omnicanal")
-
-ultima_sync = df_catalogo["ultima_sincronizacion"].max()
-subtitulo = f"Universo monitoreado: {len(df_catalogo):,} SKUs"
-if pd.notna(ultima_sync):
-    subtitulo += f" · Última sincronización: {ultima_sync:%d/%m/%Y %H:%M}"
-st.caption(subtitulo)
-
-# --- 5 Tarjetas de Resumen (KPIs) ---
-total_skus = len(df_catalogo)
-skus_auditados = int(df_catalogo["ultima_sincronizacion"].notna().sum())
-skus_aptos = int((df_catalogo["apto_publicar"] == 1).sum())
-skus_con_seguros = int((df_catalogo["stock_publicable_total"] > 0).sum())
-total_pares_seguros = int(df_catalogo["stock_publicable_total"].sum())
-total_efectivo_ml = float(df_catalogo["efectivo_total_ml"].sum())
-
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Universo Catálogo", f"{total_skus:,}")
-k2.metric("SKUs Auditados", f"{skus_auditados:,}", f"{skus_auditados / total_skus * 100:.1f}% cobertura", delta_color="off")
-k3.metric("Aptos para Publicar", f"{skus_aptos:,}", "Piso >5/talla + Tier S/A", delta_color="off")
-k4.metric("Pares Seguros", f"{total_pares_seguros:,}", f"Repartidos en {skus_con_seguros} SKUs", delta_color="off")
-k5.metric("Efectivo Potencial (ML)", f"${total_efectivo_ml:,.0f}", "Si se vende todo", delta_color="off")
-
-st.divider()
-
 # ===========================================================================
-# 4. BARRA LATERAL Y BOTÓN DE FILTRO MAESTRO
+# BARRA LATERAL: PANEL DE SEGMENTADORES MULTIDIMENSIONALES (POWER BI SLICERS)
 # ===========================================================================
-tiers_unicos = sorted(df_catalogo["tier"].unique().tolist())
-vel_maxima = float(max(10.0, df_catalogo["velocidad_diaria"].max()))
-
-
-def limpiar_filtros() -> None:
-    for clave in ("f_vista", "f_busqueda", "f_tiers", "f_vel"):
-        st.session_state.pop(clave, None)
-
-
 with st.sidebar:
-    st.header("🎛️ Filtros")
-    busqueda = st.text_input("Buscar SKU, modelo o talla (ej. T24)", key="f_busqueda", placeholder="Ej. 1338649 o T24")
-    tiers_sel = st.multiselect("Nivel (Tier)", tiers_unicos, default=tiers_unicos, key="f_tiers")
-    vel_min = st.slider("Velocidad mínima (pares/día)", 0.0, vel_maxima, 0.0, 0.1, key="f_vel")
-    st.button("Restablecer filtros", on_click=limpiar_filtros, width="stretch")
+    st.markdown("### ⚡ Segmentadores Power BI")
 
-modo_vista = st.segmented_control(
-    "Filtro maestro de vista (haz clic en '🛡️ Con Pares Seguros' para ver cuáles son):",
-    options=[VISTA_TODO, VISTA_CON_COSTO, VISTA_PARES_SEGUROS, VISTA_APTOS],
-    default=VISTA_TODO,
-    selection_mode="single",
-    key="f_vista",
-)
+    if st.button("🔄 Restablecer Todos los Filtros", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
-df_filtrado = filtrar_datos(df_catalogo, modo_vista or VISTA_TODO, busqueda, tiers_sel, vel_min)
-st.divider()
-
-# ===========================================================================
-# 5. PESTAÑAS DEL PANEL
-# ===========================================================================
-tab_ranking, tab_finanzas, tab_tallas, tab_estudio, tab_export = st.tabs([
-    "🔥 Ranking y Pares Seguros",
-    "💵 Precios y Utilidades",
-    "📦 Ver Tallas por Modelo",
-    "📸 Estudio Fotográfico",
-    "📥 Descargar Excel/CSV",
-])
-
-# --- PESTAÑA 1: RANKING Y DETALLE DE PARES SEGUROS ---
-with tab_ranking:
-    pares_en_tabla = int(df_filtrado["stock_publicable_total"].sum())
-    st.subheader("Catálogo y Desglose de Pares Seguros")
-    st.caption(
-        f"Mostrando **{len(df_filtrado):,} modelos** que suman **{pares_en_tabla:,} Pares Seguros**."
+    # 1. Nivel de Disponibilidad
+    slicer_stock_modo = st.selectbox(
+        "📦 1. Nivel de Stock:",
+        options=[
+            "Todos los Modelos Escaneados",
+            "Con Stock Físico en Vallejo (> 0)",
+            "Con Stock Blindado (>5/talla + Poisson)",
+            "Solo Aprobados para ML (Apto = 1)",
+        ],
+        index=0,
     )
 
-    if df_filtrado.empty:
-        st.info("No hay modelos que coincidan con tu búsqueda.")
+    # 2. Género / Departamento
+    lista_gen = sorted(df_raw["genero"].unique().tolist())
+    slicer_genero = st.multiselect("👥 2. Género / Departamento:", options=lista_gen, default=lista_gen)
+
+    # 3. Categoría de Calzado
+    lista_cat = sorted(df_raw["categoria"].unique().tolist())
+    slicer_categoria = st.multiselect("👟 3. Categoría / Estilo:", options=lista_cat, default=lista_cat)
+
+    # 4. Color Detectado
+    lista_col = sorted(df_raw["color"].unique().tolist())
+    slicer_color = st.multiselect("🎨 4. Color / Tono:", options=lista_col, default=lista_col)
+
+    st.markdown("---")
+    st.markdown("#### 📏 5. Segmentador de Tallas (MX)")
+
+    # 5A. Rango de Tallas en CM
+    min_t_global = float(df_tallas["talla_num"].min()) if not df_tallas.empty else 15.0
+    max_t_global = float(df_tallas["talla_num"].max()) if not df_tallas.empty else 30.0
+    if min_t_global >= max_t_global:
+        min_t_global, max_t_global = 15.0, 30.0
+
+    rango_tallas_sel = st.slider(
+        "Rango de Numeración (CM / MX):",
+        min_value=float(min_t_global),
+        max_value=float(max_t_global),
+        value=(float(min_t_global), float(max_t_global)),
+        step=0.5,
+    )
+
+    # 5B. Selección de Tallas Exactas (permite elegir una o varias tallas específicas)
+    tallas_ordenadas = sorted(
+        df_tallas["talla_norm"].dropna().unique().tolist(),
+        key=lambda x: float(x) if re.match(r"^\d+(\.\d+)?$", str(x)) else 99.0,
+    )
+    mapa_etiqueta_talla = {}
+    opciones_multitalla = []
+    for t_str in tallas_ordenadas:
+        try:
+            fv = float(t_str)
+            alias = f" (#{fv - 20:g})" if 22.0 <= fv <= 31.0 else ""
+            lbl = f"{t_str} MX{alias}"
+        except Exception:
+            lbl = f"{t_str} MX"
+        opciones_multitalla.append(lbl)
+        mapa_etiqueta_talla[lbl] = t_str
+
+    tallas_exactas_ui = st.multiselect(
+        "Filtrar Talla(s) Específica(s):",
+        options=opciones_multitalla,
+        placeholder="Ej. 27.0 MX (#7), 29.0 MX (#9)...",
+    )
+    tipo_stock_talla = st.radio(
+        "Criterio en la talla seleccionada:",
+        options=["Existencia Física en Vallejo (> 0)", "Stock Blindado Seguro (> 5 + Poisson)"],
+        index=0,
+        horizontal=False,
+    )
+
+    st.markdown("---")
+    st.markdown("#### 💰 6. Filtros Financieros y Tiers")
+
+    # 6. Tiers
+    lista_tiers = sorted(df_raw["tier"].unique().tolist())
+    slicer_tiers = st.multiselect("🏆 Tier de Rotación (UCB):", options=lista_tiers, default=lista_tiers)
+
+    # 7. Rango de Costo Socio
+    max_costo = float(max(1000.0, df_raw["costo_socio"].max()))
+    rango_costo = st.slider(
+        "💵 Costo Socio Vallejo ($ MXN):",
+        min_value=0.0,
+        max_value=max_costo,
+        value=(0.0, max_costo),
+        step=25.0,
+    )
+
+    # 8. Rango de Precio ML
+    max_precio = float(max(1500.0, df_raw["precio_ml"].max()))
+    rango_precio = st.slider(
+        "🏷️ Precio Venta ML ($ MXN):",
+        min_value=0.0,
+        max_value=max_precio,
+        value=(0.0, max_precio),
+        step=50.0,
+    )
+
+    # 9. Utilidad Neta Mínima y ROI
+    max_util = int(max(500.0, df_raw["utilidad_neta_ml"].max()))
+    min_utilidad = st.slider("📈 Utilidad Neta Mínima ($/par):", 0, max_util, 0, step=20)
+
+    # 10. Estado de Fotos HD
+    slicer_fotos = st.selectbox(
+        "📸 Estado Estudio Fotográfico:",
+        options=["Todos", "Con Carrusel HD Listo", "Sin Fotos Generadas"],
+        index=0,
+    )
+
+# ===========================================================================
+# CINTA SUPERIOR DE COMANDOS Y BUSCADOR GLOBAL MULTITÉRMNO
+# ===========================================================================
+col_tit, col_search, col_vista = st.columns([4, 5, 3])
+
+with col_tit:
+    st.markdown("## 📊 Quant-Commerce Vallejo · BI")
+    st.caption("Power BI Executive Canvas · Datos en tiempo real desde SQLite")
+
+with col_search:
+    busqueda_global = st.text_input(
+        "🔎 Buscador Multitérmino (combina palabras, SKU, color, categoría o talla):",
+        placeholder="Ej: tenis hombre negro 27   |   bota mujer   |   1250365",
+    )
+
+with col_vista:
+    modo_canvas = st.radio(
+        "🖥️ Vista Activa:",
+        options=["📊 Lienzo Power BI", "📋 Matriz & Editor SQLite", "📸 Inspector de Producto"],
+        horizontal=True,
+    )
+
+# ===========================================================================
+# MOTOR DE FILTRADO CRUZADO (CROSS-FILTERING ENGINE)
+# ===========================================================================
+df = df_raw.copy()
+
+# 1. Modo de stock
+if slicer_stock_modo == "Con Stock Físico en Vallejo (> 0)":
+    df = df[df["stock_fisico"] > 0]
+elif slicer_stock_modo == "Con Stock Blindado (>5/talla + Poisson)":
+    df = df[df["stock_publicable_total"] > 0]
+elif slicer_stock_modo == "Solo Aprobados para ML (Apto = 1)":
+    df = df[df["apto_publicar"] == 1]
+
+# 2. Dimensiones categóricas
+if slicer_genero:
+    df = df[df["genero"].isin(slicer_genero)]
+if slicer_categoria:
+    df = df[df["categoria"].isin(slicer_categoria)]
+if slicer_color:
+    df = df[df["color"].isin(slicer_color)]
+if slicer_tiers:
+    df = df[df["tier"].isin(slicer_tiers)]
+
+# 3. Rangos financieros
+df = df[(df["costo_socio"] >= rango_costo[0]) & (df["costo_socio"] <= rango_costo[1])]
+df = df[(df["precio_ml"] >= rango_precio[0]) & (df["precio_ml"] <= rango_precio[1])]
+df = df[df["utilidad_neta_ml"] >= min_utilidad]
+
+# 4. Estado de Fotos
+if slicer_fotos == "Con Carrusel HD Listo":
+    df = df[df["fotos_listas"]]
+elif slicer_fotos == "Sin Fotos Generadas":
+    df = df[~df["fotos_listas"]]
+
+# 5. Filtro por Rango de Tallas y Tallas Exactas
+tallas_filtradas = df_tallas[
+    (df_tallas["talla_num"] >= rango_tallas_sel[0]) & (df_tallas["talla_num"] <= rango_tallas_sel[1])
+].copy()
+
+tallas_exactas_codigos = [mapa_etiqueta_talla[k] for k in tallas_exactas_ui]
+
+# También detectar si escribieron una talla en la barra de búsqueda (ej. "talla 9" o "27.5")
+if busqueda_global.strip():
+    m_talla_q = re.search(r"(?:talla|del|num|#)\s*(\d{1,2}(?:\.5)?)", busqueda_global.lower())
+    if m_talla_q:
+        t_conv = normalizar_talla_mx(m_talla_q.group(1))
+        if t_conv not in tallas_exactas_codigos:
+            tallas_exactas_codigos.append(t_conv)
+
+if tallas_exactas_codigos:
+    tallas_filtradas = tallas_filtradas[tallas_filtradas["talla_norm"].isin(tallas_exactas_codigos)]
+    if tipo_stock_talla == "Stock Blindado Seguro (> 5 + Poisson)":
+        tallas_filtradas = tallas_filtradas[tallas_filtradas["stock_seguro_publicable"] > 0]
     else:
-        columnas_ranking = [
-            "id_ps", "nombre_modelo", "tier", "costo_socio",
-            "stock_total_anterior", "stock_publicable_total", "tallas_seguras",
-            "efectivo_total_ml", "velocidad_diaria", "dias_cobertura", "url_real",
-        ]
-        st.dataframe(
-            df_filtrado[columnas_ranking],
-            width="stretch",
-            height=480,
-            hide_index=True,
-            column_config={
-                "id_ps": st.column_config.TextColumn("SKU", width="small"),
-                "nombre_modelo": st.column_config.TextColumn("Modelo", width="medium"),
-                "tier": st.column_config.TextColumn("Tier", width="small"),
-                "costo_socio": st.column_config.NumberColumn("Costo Socio", format="$%.2f"),
-                "stock_total_anterior": st.column_config.NumberColumn("Físico Vallejo", format="%d"),
-                "stock_publicable_total": st.column_config.NumberColumn("🛡️ Pares Seguros", format="%d"),
-                "tallas_seguras": st.column_config.TextColumn("Tallas Seguras (Cuáles son)", width="large"),
-                "efectivo_total_ml": st.column_config.NumberColumn("💰 Efectivo Potencial ML", format="$%.0f"),
-                "velocidad_diaria": st.column_config.ProgressColumn(
-                    "Rotación (pares/día)", format="%.2f", min_value=0.0, max_value=vel_maxima
-                ),
-                "dias_cobertura": st.column_config.NumberColumn("Días Cobertura", format="%.1f"),
-                "url_real": st.column_config.LinkColumn("Catálogo", display_text="Abrir"),
-            },
+        tallas_filtradas = tallas_filtradas[tallas_filtradas["stock_vallejo"] > 0]
+
+    stk_fis_map = tallas_filtradas.groupby("id_ps")["stock_vallejo"].sum().to_dict()
+    stk_seg_map = tallas_filtradas.groupby("id_ps")["stock_seguro_publicable"].sum().to_dict()
+
+    df = df[df["id_ps"].isin(tallas_filtradas["id_ps"].unique())].copy()
+    df["stock_fisico_vista"] = df["id_ps"].map(lambda x: int(stk_fis_map.get(str(x), 0)))
+    df["stock_seguro_vista"] = df["id_ps"].map(lambda x: int(stk_seg_map.get(str(x), 0)))
+else:
+    if rango_tallas_sel != (float(min_t_global), float(max_t_global)):
+        skus_en_rango = tallas_filtradas[tallas_filtradas["stock_vallejo"] > 0]["id_ps"].unique()
+        df = df[df["id_ps"].isin(skus_en_rango)].copy()
+    df["stock_fisico_vista"] = df["stock_fisico"]
+    df["stock_seguro_vista"] = df["stock_publicable_total"]
+
+# 6. Búsqueda Multitérmino Inteligente (filtra cada palabra escrita contra el blob del producto)
+if busqueda_global.strip():
+    limpio_q = re.sub(r"(?:talla|del|num|#)\s*\d{1,2}(?:\.5)?", "", busqueda_global.lower()).strip()
+    tokens = [t for t in limpio_q.split() if len(t) > 1]
+    for tok in tokens:
+        # Sinónimos rápidos
+        if tok in ["hombre", "caballero", "varon"]:
+            df = df[df["genero"] == "Hombre"]
+        elif tok in ["mujer", "dama"]:
+            df = df[df["genero"] == "Mujer"]
+        elif tok in ["niño", "niña", "infantil"]:
+            df = df[df["genero"] == "Infantil / Juvenil"]
+        else:
+            df = df[df["blob_busqueda"].str.contains(re.escape(tok), na=False)]
+
+# ===========================================================================
+# FILA 1: TARJETAS KPI EJECUTIVAS (POWER BI HEADER CARDS)
+# ===========================================================================
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+
+n_modelos = len(df)
+n_aptos = int((df["apto_publicar"] == 1).sum())
+pares_fis = int(df["stock_fisico_vista"].sum())
+pares_seg = int(df["stock_seguro_vista"].sum())
+util_lote = float((df["utilidad_neta_ml"] * df["stock_seguro_vista"]).sum())
+cap_lote = float((df["costo_socio"] * df["stock_seguro_vista"]).sum())
+util_unit_prom = float(df["utilidad_neta_ml"].mean()) if not df.empty else 0.0
+roi_prom = float(df["roi_costo_pct"].mean()) if not df.empty else 0.0
+margen_prom = float(df["margen_neto_pct"].mean()) if not df.empty else 0.0
+
+k1.metric("📦 Modelos Activos", f"{n_modelos} SKUs", f"{n_aptos} aprobados ML")
+k2.metric("🛡️ Pares Blindados", f"{pares_seg:,}", f"De {pares_fis:,} físicos en tienda")
+k3.metric("💰 Utilidad Neta Lote", f"${util_lote:,.0f}", f"Prom: ${util_unit_prom:,.0f} / par")
+k4.metric("🏦 Capital de Compra", f"${cap_lote:,.0f}", "Si se vende todo el lote")
+k5.metric("📈 ROI sobre Costo", f"{roi_prom:.1f}%", f"Margen s/venta: {margen_prom:.1f}%")
+k6.metric("📸 Estudio HD Listo", f"{int(df['fotos_listas'].sum())} SKUs", f"{len(tallas_exactas_codigos) or 'Todas'} tallas")
+
+if df.empty:
+    st.warning("⚠️ Ningún producto coincide con los filtros actuales. Ajusta los segmentadores de la barra lateral.")
+    st.stop()
+
+# ===========================================================================
+# VISTA 1: LIENZO EJECUTIVO POWER BI (MOSAICOS INTERACTIVOS)
+# ===========================================================================
+if modo_canvas == "📊 Lienzo Power BI":
+    # --- FILA VISUAL 1: 3 MOSAICOS ---
+    c_v1, c_v2, c_v3 = st.columns([4, 4, 4])
+
+    with c_v1:
+        with st.container(border=True):
+            st.markdown('<div class="pbi-tile-header">🗺️ Mapa de Árbol: Stock y Ganancia por Categoría</div>', unsafe_allow_html=True)
+            df_tree = df[df["stock_fisico_vista"] > 0].copy()
+            if not df_tree.empty:
+                fig_tree = px.treemap(
+                    df_tree,
+                    path=[px.Constant("Vallejo"), "genero", "categoria", "color"],
+                    values="stock_fisico_vista",
+                    color="utilidad_neta_ml",
+                    color_continuous_scale="Tealgrn",
+                    height=320,
+                    template="plotly_dark",
+                )
+                fig_tree.update_layout(
+                    margin=dict(l=4, r=4, t=4, b=4),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    coloraxis_colorbar=dict(title="Util. $", thickness=10),
+                )
+                st.plotly_chart(fig_tree, use_container_width=True)
+            else:
+                st.info("Sin stock físico para mostrar el Treemap.")
+
+    with c_v2:
+        with st.container(border=True):
+            st.markdown('<div class="pbi-tile-header">📏 Curva de Bodega por Talla (Físico vs Blindado)</div>', unsafe_allow_html=True)
+            df_t_sub = df_tallas[df_tallas["id_ps"].isin(df["id_ps"])].copy()
+            if tallas_exactas_codigos:
+                df_t_sub = df_t_sub[df_t_sub["talla_norm"].isin(tallas_exactas_codigos)]
+            if not df_t_sub.empty:
+                res_talla = (
+                    df_t_sub.groupby("talla_norm", as_index=False)[["stock_vallejo", "stock_seguro_publicable"]]
+                    .sum()
+                )
+                res_talla["t_orden"] = pd.to_numeric(res_talla["talla_norm"], errors="coerce").fillna(99.0)
+                res_talla = res_talla.sort_values("t_orden")
+                res_talla["Retenido Blindaje"] = (
+                    res_talla["stock_vallejo"] - res_talla["stock_seguro_publicable"]
+                ).clip(lower=0)
+
+                fig_curva = go.Figure()
+                fig_curva.add_trace(
+                    go.Bar(
+                        x=res_talla["talla_norm"],
+                        y=res_talla["stock_seguro_publicable"],
+                        name="Seguro Publicable",
+                        marker_color="#10b981",
+                    )
+                )
+                fig_curva.add_trace(
+                    go.Bar(
+                        x=res_talla["talla_norm"],
+                        y=res_talla["Retenido Blindaje"],
+                        name="Candado (Piso 5 + Poisson)",
+                        marker_color="#374151",
+                    )
+                )
+                fig_curva.update_layout(
+                    barmode="stack",
+                    height=320,
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=4, r=4, t=10, b=4),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    xaxis_title="Talla (MX)",
+                    yaxis_title="Total Pares",
+                )
+                st.plotly_chart(fig_curva, use_container_width=True)
+            else:
+                st.info("Sin lecturas de tallas para los filtros actuales.")
+
+    with c_v3:
+        with st.container(border=True):
+            st.markdown('<div class="pbi-tile-header">🎯 Cuadrante Rentabilidad vs Rotación (UCB)</div>', unsafe_allow_html=True)
+            fig_sc = px.scatter(
+                df,
+                x="score_ucb",
+                y="utilidad_neta_ml",
+                size=df["stock_seguro_vista"].clip(lower=3),
+                color="tier",
+                hover_name="nombre_modelo",
+                hover_data=["id_ps", "categoria", "color", "precio_ml", "stock_seguro_vista"],
+                color_discrete_map={"S": "#10b981", "A": "#3b82f6", "B": "#f59e0b", "C": "#6b7280"},
+                height=320,
+                template="plotly_dark",
+            )
+            fig_sc.add_hline(y=df["utilidad_neta_ml"].median(), line_dash="dot", line_color="#6b7280")
+            fig_sc.add_vline(x=df["score_ucb"].median(), line_dash="dot", line_color="#6b7280")
+            fig_sc.update_layout(
+                margin=dict(l=4, r=4, t=10, b=4),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis_title="Velocidad Bayesiana (Score UCB)",
+                yaxis_title="Utilidad Neta ($ MXN)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+    # --- FILA VISUAL 2: MAPA DE CALOR DE TALLAS (HEATMAP) + TOP RANKING ---
+    c_v4, c_v5 = st.columns([7, 5])
+
+    with c_v4:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="pbi-tile-header">🔥 Matriz Mapa de Calor: Disponibilidad por Modelo vs. Talla (Top 15 SKUs)</div>',
+                unsafe_allow_html=True,
+            )
+            top_skus_hm = (
+                df.sort_values(["stock_seguro_vista", "stock_fisico_vista"], ascending=False)
+                .head(15)["id_ps"]
+                .tolist()
+            )
+            df_hm_src = df_tallas[df_tallas["id_ps"].isin(top_skus_hm)].copy()
+            if not df_hm_src.empty:
+                col_metrica_hm = (
+                    "stock_seguro_publicable"
+                    if tipo_stock_talla == "Stock Blindado Seguro (> 5 + Poisson)"
+                    else "stock_vallejo"
+                )
+                mapa_nom_corto = (
+                    df.set_index("id_ps")["nombre_modelo"]
+                    .apply(lambda s: str(s)[:22])
+                    .to_dict()
+                )
+                df_hm_src["modelo_etiqueta"] = (
+                    df_hm_src["id_ps"] + " · " + df_hm_src["id_ps"].map(mapa_nom_corto)
+                )
+                piv_hm = df_hm_src.pivot_table(
+                    index="modelo_etiqueta",
+                    columns="talla_norm",
+                    values=col_metrica_hm,
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                cols_ord = sorted(piv_hm.columns, key=lambda x: float(x) if re.match(r"^\d+(\.\d+)?$", str(x)) else 99.0)
+                piv_hm = piv_hm[cols_ord]
+
+                fig_hm = px.imshow(
+                    piv_hm,
+                    text_auto=True,
+                    aspect="auto",
+                    color_continuous_scale="Viridis",
+                    height=360,
+                    template="plotly_dark",
+                )
+                fig_hm.update_layout(
+                    margin=dict(l=4, r=4, t=6, b=4),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    xaxis_title="Talla Nacional (MX)",
+                    yaxis_title="SKU · Modelo",
+                    coloraxis_showscale=False,
+                )
+                st.plotly_chart(fig_hm, use_container_width=True)
+            else:
+                st.info("No hay suficientes lecturas de tallas para construir el mapa de calor.")
+
+    with c_v5:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="pbi-tile-header">💰 Estructura de Precios: Costo Vallejo vs. Utilidad Libre (Top 12)</div>',
+                unsafe_allow_html=True,
+            )
+            df_top_f = df.sort_values("utilidad_potencial_lote", ascending=True).tail(12).copy()
+            df_top_f["etiq"] = df_top_f["id_ps"] + " · " + df_top_f["nombre_modelo"].str.slice(0, 20)
+
+            fig_combo = go.Figure()
+            fig_combo.add_trace(
+                go.Bar(
+                    y=df_top_f["etiq"],
+                    x=df_top_f["costo_socio"],
+                    name="Costo Vallejo",
+                    orientation="h",
+                    marker_color="#64748b",
+                )
+            )
+            fig_combo.add_trace(
+                go.Bar(
+                    y=df_top_f["etiq"],
+                    x=df_top_f["utilidad_neta_ml"],
+                    name="Utilidad Neta Libre",
+                    orientation="h",
+                    marker_color="#10b981",
+                )
+            )
+            fig_combo.update_layout(
+                barmode="group",
+                height=360,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=4, r=4, t=10, b=4),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                xaxis_title="$ MXN por Par",
+            )
+            st.plotly_chart(fig_combo, use_container_width=True)
+
+    # --- FILA VISUAL 3: MATRIZ POWER BI CON FORMATO CONDICIONAL (DATA BARS) ---
+    with st.container(border=True):
+        st.markdown(
+            '<div class="pbi-tile-header">📋 Matriz Detallada de Catálogo (Con Barras de Datos Condicionales)</div>',
+            unsafe_allow_html=True,
         )
-
-# --- PESTAÑA 2: FINANZAS ---
-with tab_finanzas:
-    st.subheader("Simulador de Precios y Ganancia Libre por Canal")
-    df_fin = df_filtrado[df_filtrado["costo_socio"] > 0]
-
-    if df_fin.empty:
-        st.info("No hay modelos con costo de socio en la vista actual.")
-    else:
-        columnas_finanzas = [
-            "id_ps", "nombre_modelo", "stock_publicable_total", "costo_socio",
-            "ref_competencia_x2", "precio_piso_ml", "precio_ml", "utilidad_neta_ml",
-            "efectivo_total_ml", "fondo_merma_ml", "iva_a_favor_ml",
-            "precio_amazon", "utilidad_neta_amazon", "precio_tiktok", "utilidad_neta_tiktok",
+        cols_matriz = [
+            "id_ps",
+            "tier",
+            "nombre_modelo",
+            "genero",
+            "categoria",
+            "color",
+            "curva_tallas_txt",
+            "tallas_seguras_txt",
+            "stock_seguro_vista",
+            "stock_fisico_vista",
+            "costo_socio",
+            "precio_ml",
+            "utilidad_neta_ml",
+            "margen_neto_pct",
+            "score_ucb",
         ]
+        max_seg_bar = int(max(10, df["stock_seguro_vista"].max()))
+        max_fis_bar = int(max(10, df["stock_fisico_vista"].max()))
+
         st.dataframe(
-            df_fin[columnas_finanzas],
-            width="stretch",
-            height=480,
-            hide_index=True,
+            df[cols_matriz].sort_values(
+                by=["stock_seguro_vista", "utilidad_neta_ml", "score_ucb"],
+                ascending=[False, False, False],
+            ),
             column_config={
                 "id_ps": "SKU",
+                "tier": "Tier",
                 "nombre_modelo": "Modelo",
-                "stock_publicable_total": st.column_config.NumberColumn("🛡️ Pares Seguros", format="%d"),
-                "costo_socio": st.column_config.NumberColumn("Costo Socio", format="$%.2f"),
-                "ref_competencia_x2": st.column_config.NumberColumn("Ref. Rival (x2)", format="$%.2f"),
-                "precio_piso_ml": st.column_config.NumberColumn("Piso ML", format="$%.2f"),
-                "precio_ml": st.column_config.NumberColumn("Precio ML", format="$%.2f"),
-                "utilidad_neta_ml": st.column_config.NumberColumn("💵 Ganancia/Par ML", format="$%.2f"),
-                "efectivo_total_ml": st.column_config.NumberColumn("💰 Ganancia Total ML", format="$%.0f"),
-                "fondo_merma_ml": st.column_config.NumberColumn(f"🛡️ Merma ({MERMA_PCT}%)", format="$%.2f"),
-                "iva_a_favor_ml": st.column_config.NumberColumn("🏛️ IVA a Favor", format="+$%.2f"),
-                "precio_amazon": st.column_config.NumberColumn("Precio Amazon", format="$%.2f"),
-                "utilidad_neta_amazon": st.column_config.NumberColumn("💵 Ganancia Amazon", format="$%.2f"),
-                "precio_tiktok": st.column_config.NumberColumn("Precio TikTok", format="$%.2f"),
-                "utilidad_neta_tiktok": st.column_config.NumberColumn("💵 Ganancia TikTok", format="$%.2f"),
+                "genero": "Género",
+                "categoria": "Categoría",
+                "color": "Color",
+                "curva_tallas_txt": "Rango Tallas",
+                "tallas_seguras_txt": "Tallas Blindadas (Pares)",
+                "stock_seguro_vista": st.column_config.ProgressColumn(
+                    "Stock Seguro",
+                    format="%d pares",
+                    min_value=0,
+                    max_value=max_seg_bar,
+                ),
+                "stock_fisico_vista": st.column_config.ProgressColumn(
+                    "Físico Tienda",
+                    format="%d pares",
+                    min_value=0,
+                    max_value=max_fis_bar,
+                ),
+                "costo_socio": st.column_config.NumberColumn("Costo", format="$%.0f"),
+                "precio_ml": st.column_config.NumberColumn("Precio ML", format="$%.0f"),
+                "utilidad_neta_ml": st.column_config.NumberColumn("Utilidad Libre", format="$%.2f"),
+                "margen_neto_pct": st.column_config.ProgressColumn(
+                    "Margen %",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=40,
+                ),
+                "score_ucb": st.column_config.NumberColumn("UCB", format="%.2f"),
             },
+            use_container_width=True,
+            hide_index=True,
+            height=380,
         )
 
-# --- PESTAÑA 3: TALLAS POR MODELO ---
-with tab_tallas:
-    st.subheader("Existencias por Talla (Físico en Tienda vs. Seguro para Publicar)")
+# ===========================================================================
+# VISTA 2: MATRIZ INTERACTIVA Y EDITOR DIRECTO EN SQLITE
+# ===========================================================================
+elif modo_canvas == "📋 Matriz & Editor SQLite":
+    with st.container(border=True):
+        st.markdown(
+            '<div class="pbi-tile-header">🎛️ Editor de Publicación y Clasificación General (Guarda directo en SQLite)</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Activa o pausa productos (`Publicar ML`) o ajusta el Género y Categoría de cualquier SKU.")
 
-    # Mostrar primero los que tienen stock seguro para no buscar a ciegas
-    base_tallas = df_filtrado if not df_filtrado.empty else df_catalogo
-    opciones_df = base_tallas.head(MAX_OPCIONES_SELECTOR)
-    mapa_nombres = dict(zip(opciones_df["id_ps"], opciones_df["_etiqueta_menu"]))
+        df_edit = st.data_editor(
+            df[
+                [
+                    "apto_bool",
+                    "id_ps",
+                    "tier",
+                    "nombre_modelo",
+                    "genero",
+                    "categoria",
+                    "color",
+                    "costo_socio",
+                    "precio_ml",
+                    "utilidad_neta_ml",
+                    "stock_seguro_vista",
+                    "stock_fisico_vista",
+                    "tallas_seguras_txt",
+                ]
+            ].sort_values(["apto_bool", "stock_seguro_vista"], ascending=[False, False]),
+            column_config={
+                "apto_bool": st.column_config.CheckboxColumn("✅ Publicar ML"),
+                "id_ps": st.column_config.TextColumn("SKU", disabled=True),
+                "tier": st.column_config.TextColumn("Tier", disabled=True),
+                "nombre_modelo": st.column_config.TextColumn("Modelo", disabled=True),
+                "genero": st.column_config.SelectboxColumn(
+                    "Género",
+                    options=["Hombre", "Mujer", "Infantil / Juvenil", "Unisex"],
+                    required=True,
+                ),
+                "categoria": st.column_config.SelectboxColumn(
+                    "Categoría",
+                    options=[
+                        "Tenis / Deportivo",
+                        "Casual / Urbano",
+                        "Bota / Botín",
+                        "Sandalia / Confort",
+                        "Formal / Escolar",
+                    ],
+                    required=True,
+                ),
+                "color": st.column_config.TextColumn("Color", disabled=True),
+                "costo_socio": st.column_config.NumberColumn("Costo", format="$%.0f", disabled=True),
+                "precio_ml": st.column_config.NumberColumn("Precio ML", format="$%.0f", disabled=True),
+                "utilidad_neta_ml": st.column_config.NumberColumn("Utilidad Neta", format="$%.2f", disabled=True),
+                "stock_seguro_vista": st.column_config.NumberColumn("Pares Seguros", disabled=True),
+                "stock_fisico_vista": st.column_config.NumberColumn("Físico Vallejo", disabled=True),
+                "tallas_seguras_txt": st.column_config.TextColumn("Tallas Blindadas", disabled=True),
+            },
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+        )
 
-    sku_elegido = st.selectbox(
-        "Elige un modelo para ver sus tallas:",
-        options=list(mapa_nombres.keys()),
-        format_func=mapa_nombres.get,
-        key="sku_tallas",
-    )
+        if st.button("💾 Guardar Cambios en Base de Datos", type="primary"):
+            conn = sqlite3.connect(RUTA_BD, timeout=20)
+            cols_actuales = [c[1] for c in conn.execute("PRAGMA table_info(zapatos_candidatos)").fetchall()]
+            for c_nueva in ("genero", "tipo_calzado"):
+                if c_nueva not in cols_actuales:
+                    conn.execute(f"ALTER TABLE zapatos_candidatos ADD COLUMN {c_nueva} TEXT;")
+            for _, r in df_edit.iterrows():
+                conn.execute(
+                    """
+                    UPDATE zapatos_candidatos
+                    SET apto_publicar = ?, genero = ?, tipo_calzado = ?
+                    WHERE CAST(id_ps AS TEXT) = ?
+                    """,
+                    (
+                        1 if r["apto_bool"] else 0,
+                        str(r["genero"]),
+                        str(r["categoria"]),
+                        str(r["id_ps"]),
+                    ),
+                )
+            conn.commit()
+            conn.close()
+            st.cache_data.clear()
+            st.success("✅ ¡Cambios guardados en `data/zapateria_vallejo.db`!")
+            st.rerun()
 
-    if sku_elegido:
-        info_sku = df_catalogo[df_catalogo["id_ps"] == sku_elegido].iloc[0]
+# ===========================================================================
+# VISTA 3: INSPECTOR DE PRODUCTO (CASCADA FINANCIERA + TALLAS + ESTUDIO HD)
+# ===========================================================================
+else:
+    opciones_insp = (
+        df["id_ps"]
+        + " · "
+        + df["nombre_modelo"]
+        + " ("
+        + df["stock_seguro_vista"].astype(str)
+        + " seguros / "
+        + df["stock_fisico_vista"].astype(str)
+        + " físicos)"
+    ).tolist()
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Costo Socio", f"${info_sku['costo_socio']:,.2f}")
-        m2.metric("Precio Mercado Libre", f"${info_sku['precio_ml']:,.2f}")
-        m3.metric("Stock Físico Vallejo", f"{int(info_sku['stock_total_anterior']):,} pares")
-        m4.metric("Pares Seguros", f"{int(info_sku['stock_publicable_total']):,} pares")
+    sel_insp = st.selectbox("🔍 Selecciona un SKU filtrado para auditar sus finanzas, tallas y fotos HD:", opciones_insp)
+    sku_i = sel_insp.split(" · ")[0]
+    fila_i = df[df["id_ps"] == sku_i].iloc[0]
 
-        df_tallas_sku = cargar_tallas_sku(str(RUTA_BD), MTIME_BD, sku_elegido)
-        if df_tallas_sku.empty:
-            st.info("Este modelo aún no tiene historial de tallas registrado.")
-        else:
-            col_grafica, col_tabla = st.columns(2)
-            with col_grafica:
-                st.markdown("**Comparativa Visual por Talla**")
-                st.bar_chart(
-                    df_tallas_sku,
-                    x="talla",
-                    y=["stock_vallejo", "stock_seguro_publicable"],
+    col_i1, col_i2 = st.columns([6, 6])
+
+    with col_i1:
+        with st.container(border=True):
+            st.markdown(f'<div class="pbi-tile-header">💰 Cascada Financiera · SKU {sku_i}</div>', unsafe_allow_html=True)
+            precio_v = float(fila_i["precio_ml"])
+            costo_s = float(fila_i["costo_socio"])
+            comision_ml = round(precio_v * 0.175, 2)
+            envio_ml = 98.0 if costo_s < 350 else (112.0 if costo_s < 650 else 128.0)
+            ret_sat = round((precio_v / 1.16) * (0.08 + 0.025), 2)
+            merma_2 = float(fila_i["fondo_merma_ml"])
+            util_neta = float(fila_i["utilidad_neta_ml"])
+
+            fig_wf = go.Figure(
+                go.Waterfall(
+                    orientation="v",
+                    measure=["absolute", "relative", "relative", "relative", "relative", "relative", "total"],
+                    x=["Precio ML", "Costo Socio", "Comisión 17.5%", "Envío ML", "SAT", "Fondo 2%", "Utilidad Libre"],
+                    text=[
+                        f"${precio_v:,.0f}",
+                        f"-${costo_s:,.0f}",
+                        f"-${comision_ml:,.0f}",
+                        f"-${envio_ml:,.0f}",
+                        f"-${ret_sat:,.0f}",
+                        f"-${merma_2:,.0f}",
+                        f"${util_neta:,.2f}",
+                    ],
+                    y=[precio_v, -costo_s, -comision_ml, -envio_ml, -ret_sat, -merma_2, 0],
+                )
+            )
+            fig_wf.update_layout(
+                height=320,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=4, r=4, t=10, b=4),
+            )
+            st.plotly_chart(fig_wf, use_container_width=True)
+
+    with col_i2:
+        with st.container(border=True):
+            st.markdown(f'<div class="pbi-tile-header">📏 Desglose Talla por Talla en Vallejo · SKU {sku_i}</div>', unsafe_allow_html=True)
+            tallas_sku = df_tallas[df_tallas["id_ps"] == sku_i].copy()
+            if not tallas_sku.empty:
+                tallas_sku = tallas_sku.sort_values("talla_num")
+                tallas_sku["Retenido (Piso 5 + Poisson)"] = (
+                    tallas_sku["stock_vallejo"] - tallas_sku["stock_seguro_publicable"]
+                ).clip(lower=0)
+
+                fig_ts = go.Figure()
+                fig_ts.add_trace(
+                    go.Bar(
+                        x=tallas_sku["talla_norm"],
+                        y=tallas_sku["stock_seguro_publicable"],
+                        name="Pares Publicables ML",
+                        marker_color="#10b981",
+                    )
+                )
+                fig_ts.add_trace(
+                    go.Bar(
+                        x=tallas_sku["talla_norm"],
+                        y=tallas_sku["Retenido (Piso 5 + Poisson)"],
+                        name="Retenido por Blindaje",
+                        marker_color="#4b5563",
+                    )
+                )
+                fig_ts.add_hline(y=PISO_FANTASMA_TALLA, line_dash="dash", line_color="#ef4444", annotation_text="Piso 5 pares")
+                fig_ts.update_layout(
+                    barmode="stack",
                     height=320,
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=4, r=4, t=10, b=4),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
-            with col_tabla:
-                st.markdown("**Pares Exactos por Talla**")
-                st.dataframe(
-                    df_tallas_sku[["talla", "stock_vallejo", "stock_seguro_publicable"]],
-                    hide_index=True,
-                    width="stretch",
-                    column_config={
-                        "talla": "Talla MX",
-                        "stock_vallejo": st.column_config.NumberColumn("Físico en Vallejo", format="%d pares"),
-                        "stock_seguro_publicable": st.column_config.NumberColumn(
-                            "🛡️ Publicar en Línea", format="%d pares"
-                        ),
-                    },
-                )
+                st.plotly_chart(fig_ts, use_container_width=True)
 
-# --- PESTAÑA 4: ESTUDIO FOTOGRÁFICO ---
-with tab_estudio:
-    st.subheader("Galería de Fotos Lista para Publicar")
-    solo_con_fotos = st.checkbox("Mostrar solo modelos con fotos listas", value=True)
-
-    df_fotos = df_catalogo[df_catalogo["costo_socio"] > 0]
-    if solo_con_fotos and not df_fotos[df_fotos["estudio_foto_listo"] == 1].empty:
-        df_fotos = df_fotos[df_fotos["estudio_foto_listo"] == 1]
-
-    if df_fotos.empty:
-        st.info("Aún no hay modelos con costo o fotos procesadas.")
-    else:
-        opciones_fotos = df_fotos.head(MAX_OPCIONES_SELECTOR)
-        mapa_fotos = dict(zip(opciones_fotos["id_ps"], opciones_fotos["_etiqueta_menu"]))
-
-        sku_foto = st.selectbox(
-            "Elige un modelo para revisar sus fotos:",
-            options=list(mapa_fotos.keys()),
-            format_func=mapa_fotos.get,
-            key="sku_fotos",
-        )
-
-        archivos_img = obtener_fotos_sku(sku_foto) if sku_foto else []
-        if not archivos_img:
-            st.warning(f"No hay imágenes en `{DIR_CATALOGO / str(sku_foto)}`.")
-        else:
-            columnas_img = st.columns(min(4, len(archivos_img)))
-            for i, ruta_img in enumerate(archivos_img):
-                with columnas_img[i % len(columnas_img)]:
-                    st.image(str(ruta_img), caption=ruta_img.name, width="stretch")
-
-# --- PESTAÑA 5: EXPORTAR A EXCEL / CSV ---
-with tab_export:
-    st.subheader("Descargar Tabla Filtrada")
-    if df_filtrado.empty:
-        st.info("No hay datos filtrados para exportar.")
-    else:
-        st.caption(f"Se descargarán los **{len(df_filtrado):,} modelos** que tienes filtrados actualmente.")
-        columnas_ocultas = ["_etiqueta_menu", "_texto_busqueda"]
-        csv_bytes = df_filtrado.drop(columns=columnas_ocultas).to_csv(index=False).encode("utf-8-sig")
-
-        st.download_button(
-            label="📥 Descargar Reporte en CSV (Para Excel)",
-            data=csv_bytes,
-            file_name=f"reporte_vallejo_{datetime.now():%Y%m%d_%H%M}.csv",
-            mime="text/csv",
-        )
+    with st.container(border=True):
+        st.markdown(f'<div class="pbi-tile-header">📸 Carrusel Estudio Fotográfico HD (1200x1200) · SKU {sku_i}</div>', unsafe_allow_html=True)
+        carpeta_img = DIR_CATALOGO / sku_i
+        archivos_img = [
+            ("1. Portada Blanca", carpeta_img / "01_portada_blanca.jpg"),
+            ("2. Ángulo Detalle", carpeta_img / "02_angulo_galeria.jpg"),
+            ("3. Ficha Beneficios", carpeta_img / "03_ficha_beneficios.jpg"),
+            ("4. Guía de Tallas (CM)", carpeta_img / "04_guia_tallas_cm.jpg"),
+        ]
+        cols_img = st.columns(4)
+        for idx, (tit_i, ruta_i) in enumerate(archivos_img):
+            with cols_img[idx]:
+                if ruta_i.exists():
+                    st.image(str(ruta_i), caption=tit_i, use_container_width=True)
+                else:
+                    st.info(f"Sin imagen: {ruta_i.name}")

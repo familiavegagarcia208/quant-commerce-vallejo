@@ -4,3 +4,4 @@ beautifulsoup4
 pandas
 streamlit>=1.43.0
 Pillow
+plotly>=5.20.0
