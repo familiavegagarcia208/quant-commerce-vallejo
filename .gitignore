@@ -1,28 +1,7 @@
-# Entorno virtual de Python (NUNCA subir a GitHub)
-venv/
-.venv/
-env/
-__pycache__/
-*.pyc
-
-# Secretos industriales y sesiones privadas (Se inyectan vía GitHub Secrets)
-data/sesion_vallejo.json
-data/ml_credenciales.json
-.env
-
-# Archivos temporales de SQLite y caché crudo
-data/*.db-wal
-data/*.db-shm
-data/imagenes_origen/
-data/simulacion_bulk_ml.json
-
 venv/
 __pycache__/
 .streamlit/
-.intento_web
 *.zip
-*.db
 *.db-wal
 *.db-shm
-data/catalogo_listo/
 data/catalogos_pdf/
