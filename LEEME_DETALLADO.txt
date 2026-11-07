@@ -1,0 +1,499 @@
+================================================================================
+
+                    MANUAL TÉCNICO Y OPERATIVO DETALLADO
+
+                     QUANT-COMMERCE: ZAPATERÍA VALLEJO
+
+          (Pipeline Exclusivo de 44 Catálogos PDF -> Mercado Libre)
+
+================================================================================
+
+
+
+1. ¿QUÉ ES Y QUÉ HACE ESTE SISTEMA?
+
+--------------------------------------------------------------------------------
+
+Este proyecto es un sistema automatizado de comercio electrónico diseñado para
+
+auditar el inventario físico real de la sucursal Price Shoes Vallejo, calcular
+
+la rentabilidad exacta de cada producto después de impuestos y comisiones, y
+
+fabricar automáticamente los carruseles fotográficos en alta definición
+
+($1200 \times 1200\text{ px}$) listos para publicarse en Mercado Libre.
+
+
+
+REGLA DE ORO DEL SISTEMA (EXCLUSIVIDAD DE 44 CATÁLOGOS PDF):
+
+El robot ignora y elimina cualquier producto proveniente del Sitemap general
+
+web de Price Shoes (códigos sueltos sin catálogo). Únicamente procesa, audita y
+
+conserva los artículos que pertenecen a los 44 Catálogos PDF Oficiales.
+
+
+
+
+
+================================================================================
+
+2. DIAGRAMA DE FLUJO DEL SISTEMA (PASO A PASO)
+
+================================================================================
+
+
+
+  [ETAPA 0: EXTRACCIÓN DE CATÁLOGOS PDF]
+
+  Archivo: paso0_extractor_catalogos_pdf.py
+
+  Lee los 44 PDFs en data/catalogos_pdf/ --> Extrae cada SKU y le asigna su
+
+  etiqueta oficial en la columna `origen_catalogo` (ej. "1342200 - Caballeros").
+
+         |
+
+         v
+
+  [ETAPA 1: PURGA Y BLINDAJE DE BASE DE DATOS]
+
+  Archivo: purgar_fuente_catalogo.py
+
+  Revisa `data/zapateria_vallejo.db` y la carpeta `data/catalogo_listo/`.
+
+  Si encuentra algún SKU o carpeta de fotos que NO pertenezca a los 44 PDFs,
+
+  lo elimina físicamente para mantener el inventario 100% limpio.
+
+         |
+
+         v
+
+  [ETAPA 2: RECOLECCIÓN Y AUDITORÍA WEB ANTI-BAN]
+
+  Archivo: paso3_recolector_ligero.py (usa la sesión de paso12_login_socio.py)
+
+  1. Primero barre los SKUs vírgenes (sin costo de socio) respetando el orden
+
+     de prioridad de los 44 catálogos.
+
+  2. Después re-audita los SKUs con stock usando la fórmula UCB Bayesiana.
+
+  3. Abre el navegador con Playwright, consulta el Costo Socio, abre el modal
+
+     "Ver disponibilidad en tiendas" y lee exclusivamente la fila "Vallejo"
+
+     (tanto tallas de calzado con punto decimal como tallas de ropa CH/M/G/XG).
+
+         |
+
+         v
+
+  [ETAPA 3: ESTUDIO FOTOGRÁFICO HD Y CLASIFICADOR DE 12 CATEGORÍAS]
+
+  Archivo: paso6_estudio_fotografico.py
+
+  Para cada SKU de catálogo con stock y precio:
+
+  1. Descarga la 1.a y 2.a foto oficial desde el CDN de Price Shoes (máximo 40
+
+     descargas web por corrida para evitar bloqueos de IP).
+
+  2. Guarda respaldos crudos (`01_original_raw.jpg` y `02_angulo_raw.jpg`) para
+
+     no degradar la calidad en futuras ejecuciones.
+
+  3. Clasifica el artículo en 1 de los 12 perfiles de prenda (Calzado Adulto,
+
+     Calzado Infantil, Camisa, Blusa, Playera, Chamarra, Pantalón, Calcetín,
+
+     Ropa Interior/Fajas, Accesorios/Gorras, Perfumería u Hogar/Cocina).
+
+  4. Renderiza las 4 láminas cuadradas ($1200 \times 1200\text{ px}$) con $0^\circ$ de rotación:
+
+     - 01_portada_blanca.jpg   : Producto maximizado sobre fondo blanco puro.
+
+     - 02_angulo_galeria.jpg   : Segundo ángulo oficial (sin inclinar ni rotar).
+
+     - 03_ficha_beneficios.jpg : Ficha comercial con chips azules de stock real.
+
+     - 04_guia_tallas_cm.jpg   : Tabla de medidas en CM y guía de 3 pasos.
+
+         |
+
+         v
+
+  [ETAPA 4: MOTOR FINANCIERO Y SEMÁFORO DE PUBLICACIÓN]
+
+  Archivo: paso5_motor_financiero.py
+
+  Calcula el Precio Sugerido de venta, descuenta comisión de Mercado Libre,
+
+  costo de envío y retenciones fiscales ($\text{IVA} + \text{ISR}$) para obtener la
+
+  Ganancia Neta real. Verifica que la carpeta tenga sus 4 láminas ($4/4$) y
+
+  asigna el Semáforo: RECOMENDADO o NO RECOMENDADO.
+
+         |
+
+         v
+
+  [ETAPA 5: PANEL DE CONTROL INTERACTIVO]
+
+  Archivo: paso4_panel_control.py (Streamlit)
+
+  Muestra el inventario en el navegador con selector lateral de los 44
+
+  catálogos oficiales, métricas financieras, tabla editable con casilla
+
+  "Subir a ML" y visor en vivo de las 4 láminas HD de cada producto.
+
+
+
+
+
+================================================================================
+
+3. LOS 9 ARCHIVOS DE PYTHON ESENCIALES (LOS QUE SÍ USAMOS)
+
+================================================================================
+
+
+
+1) paso0_extractor_catalogos_pdf.py
+
+   - Función: Escanea los 44 archivos PDF dentro de `data/catalogos_pdf/`.
+
+   - Resultado: Inserta los códigos de producto en la tabla `zapatos_candidatos`
+
+     marcando exactamente de qué catálogo provienen (`origen_catalogo`).
+
+
+
+2) paso1_crear_bd.py
+
+   - Función: Crea y asegura la estructura de tablas en `data/zapateria_vallejo.db`
+
+     activando el modo concurrente `PRAGMA journal_mode=WAL;`.
+
+   - Tablas principales:
+
+     * `zapatos_candidatos`: Datos maestros del modelo, costo socio, URL real,
+
+       parámetros bayesianos ($\alpha$, $\beta$), velocidad de venta, Tier y catálogo.
+
+     * `historial_stock_21_dias`: Desglose de pares/piezas disponibles por cada
+
+       talla en la sucursal Vallejo.
+
+
+
+3) paso12_login_socio.py
+
+   - Función: Abre una ventana de navegador para iniciar sesión con tu cuenta
+
+     de socio en Price Shoes y guarda las cookies/tokens en `data/sesion_vallejo.json`.
+
+   - Cuándo usarlo: Solo cuando caduque la sesión y el recolector avise que no
+
+     detecta el precio de Socio.
+
+
+
+4) purgar_fuente_catalogo.py
+
+   - Función: Limpieza profunda. Borra de la base de datos SQLite y de la
+
+     carpeta `data/catalogo_listo/` cualquier código heredado que no pertenezca
+
+     a los 44 catálogos PDF oficiales.
+
+
+
+5) paso3_recolector_ligero.py
+
+   - Función: Robot auditor con Playwright y pausas humanas Anti-Ban.
+
+   - Mejoras clave:
+
+     * Ya NO descarga el Sitemap XML web.
+
+     * Depura automáticamente cualquier SKU ajeno a los 44 PDFs antes de empezar.
+
+     * Captura tallas de calzado con punto decimal ($15.0$ a $32.0$) y también
+
+       tallas de ropa, lencería, calcetería y jeans (CH, M, G, XG, 28-42, UNI).
+
+     * Actualiza la URL canónica real y el nombre limpio del modelo (H1).
+
+
+
+6) paso5_motor_financiero.py
+
+   - Función: Calcula los Unit Economics de cada SKU para Mercado Libre.
+
+   - Regla del Semáforo (RECOMENDADO):
+
+     * Pertenece a uno de los 44 catálogos PDF.
+
+     * Cuenta con las 4 láminas fotográficas completas ($4/4$).
+
+     * Tiene Stock en Vallejo $\ge 5$ unidades y Ganancia Neta $\ge \$100.00\text{ MXN}$.
+
+
+
+7) paso6_estudio_fotografico.py
+
+   - Función: Estudio de diseño gráfico automatizado con Pillow y `curl_cffi`.
+
+   - Mejoras clave:
+
+     * Recorta márgenes blancos sobrantes para que el producto luzca grande.
+
+     * Descarga el 2.o ángulo oficial desde el código fuente (`__NEXT_DATA__` /
+
+       `JSON-LD`) de Price Shoes y lo muestra a $0^\circ$ (sin inclinación).
+
+     * Incluye el árbol clasificador de 12 categorías para que las láminas 03
+
+       y 04 muestren siempre los beneficios y la tabla de medidas correcta.
+
+     * Al terminar, ejecuta automáticamente `paso5_motor_financiero.py` para
+
+       actualizar el conteo de fotos a $4/4$.
+
+
+
+8) paso4_panel_control.py
+
+   - Función: Dashboard visual en Streamlit (`http://localhost:8501`).
+
+   - Características: Filtro desplegable con los 44 nombres oficiales de
+
+     catálogo, filtro por Semáforo, buscador por SKU/Marca, tabla interactiva
+
+     y galería de 4 columnas para inspeccionar cada carrusel.
+
+
+
+9) pipeline_catalogo.py
+
+   - Función: Orquestador maestro que ejecuta en secuencia el recolector, el
+
+     motor financiero y el estudio fotográfico para procesar lotes completos.
+
+
+
+
+
+================================================================================
+
+4. ARCHIVOS OBSOLETOS QUE SE DEJARON FUERA (NO SE USAN)
+
+================================================================================
+
+Los siguientes 16 archivos pertenecían a pruebas antiguas o sitemaps web y se
+
+excluyen del paquete limpio de producción:
+
+  - daemon_vallejo.py                (Reemplazado por pipeline_catalogo.py)
+
+  - paso2_radar_nivel1.py            (Antiguo radar web descartado)
+
+  - paso2_radar_sitemap.py           (Metía SKUs basura del Sitemap XML)
+
+  - paso3_tracker_competencia.py     (Prototipo experimental sin uso)
+
+  - paso4_panel_control_Respaldo.py  (Copia vieja del panel)
+
+  - paso5_motor_matematico.py        (Versión previa reemplazada por paso5_motor_financiero.py)
+
+  - paso6_estudio_pillow.py          (Versión previa reemplazada por paso6_estudio_fotografico.py)
+
+  - paso7_agentes_ia.py              (Experimental fuera del flujo actual)
+
+  - paso7_sincronizador_ml.py        (Borrador antiguo)
+
+  - paso8_poka_yoke_empaque.py       (Módulo futuro no utilizado hoy)
+
+  - paso8_preparar_nube.py           (Script auxiliar obsoleto)
+
+  - paso10_auditoria_real.py         (Prueba aislada sustituida por paso3)
+
+  - paso11_probar_stock_real.py      (Script de diagnóstico puntual)
+
+  - paso13_extraer_stock_vallejo.py  (Integrado dentro de paso3_recolector_ligero.py)
+
+  - paso14_sincronizador_real.py     (Versión intermedia deprecada)
+
+  - paso15_prueba_5_articulos.py     (Script temporal de prueba de 5 SKUs)
+
+
+
+
+
+================================================================================
+
+5. LÓGICA MATEMÁTICA DEL ROBOT (RESUMEN EJECUTIVO)
+
+================================================================================
+
+
+
+A) FÓRMULA DE PRIORIZACIÓN UCB BAYESIANA (paso3_recolector_ligero.py):
+
+   Para decidir qué productos auditar en cada micro-sesión de 60 artículos:
+
+   1. Nivel 1 (SKUs Vírgenes): Primero pasan todos los artículos de los 44 PDFs
+
+      que aún tienen `costo_socio = 0`, ordenados según la lista de prioridad
+
+      comercial de catálogos.
+
+   2. Nivel 2 (Re-auditoría Inteligente): Los artículos ya conocidos se ordenan
+
+      mediante el puntaje Upper Confidence Bound (UCB):
+
+
+
+      $$\text{Score}_{\text{UCB}} = \left( \frac{\alpha}{\beta} + 1.41 \frac{\sqrt{\alpha}}{\beta} \right) \cdot \ln\left(1 + \Delta t_{\text{días}}\right)$$
+
+
+
+      Donde:
+
+      - $\alpha$ (Alpha): Ventas detectadas (disminución de stock en Vallejo)
+
+        con factor de decaimiento de memoria $\gamma = 0.90$.
+
+      - $\beta$ (Beta): Días acumulados de observación.
+
+      - $\Delta t_{\text{días}}$: Días transcurridos desde la última revisión.
+
+
+
+B) CLASIFICACIÓN AUTOMÁTICA DE TIERS:
+
+   - Tier S : Alta rotación ($\text{velocidad} \ge 2.5\text{ pares/día}$) y con stock activo.
+
+   - Tier A : Rotación constante ($\text{velocidad} \ge 0.8\text{ pares/día}$) y con stock.
+
+   - Tier B : Rotación moderada o en observación inicial.
+
+   - Tier Z : Agotado crónico (sin stock en múltiples revisiones; se pausa su
+
+              monitoreo para no gastar peticiones en vano).
+
+
+
+C) CÁLCULO DE GANANCIA NETA (paso5_motor_financiero.py):
+
+
+
+   $$\text{Ganancia Neta} = P_{\text{venta}} - C_{\text{socio}} - \text{Comisión}_{\text{ML}} - \text{Envío} - \text{Retenciones}_{\text{IVA/ISR}}$$
+
+
+
+
+
+================================================================================
+
+6. ORDEN DE PRIORIDAD DE LOS 44 CATÁLOGOS PDF OFICIALES
+
+================================================================================
+
+El recolector barre los catálogos en este orden comercial:
+
+
+
+ 01. 1342200 - Caballeros                 23. 1377702 - Exclusivos
+
+ 02. 1370231 - Escolar                    24. 1380516 - Oportunidades Urbano
+
+ 03. 1346256 - Urbano                     25. 1380358 - Importados Fall Ofertas
+
+ 04. 1345253 - Botas                      26. 1381316 - Med Chef
+
+ 05. 1346284 - Vestir Casual              27. 1353556 - Calzado y Accesorios
+
+ 06. 1348737 - Vestir                     28. 1376435 - Todo en Uno
+
+ 07. 1348757 - Man                        29. 1348749 - NBA
+
+ 08. 1348783 - Kids                       30. 1348753 - NFL
+
+ 09. 1378033 - Kids Todo en Uno           31. 1368800 - Prokennex Mini
+
+ 10. 1348800 - Licencias                  32. 1368804 - Pop Universe Mini
+
+ 11. 1353843 - Confort                    33. 1368805 - Urban Lifestyle Mini
+
+ 12. 1380354 - Reebok Impulsados          34. 1352311 - Seven Jeans
+
+ 13. 1380332 - Goodyear Botas             35. 1381338 - Jeans
+
+ 14. 1380328 - Botas Largas               36. 1348733 - Abrigador
+
+ 15. 1380359 - Botas Kits                 37. 1348804 - Pijamas
+
+ 16. 1380363 - Basicos Botines            38. 1380996 - Love to Lounge
+
+ 17. 1380367 - Botas Texano               39. 1381346 - Basicos OID6
+
+ 18. 1368789 - Sandalias                  40. 1381350 - Mushu Esenciales Home
+
+ 19. 1353557 - Juvenil                    41. 1348779 - Accesorios
+
+ 20. 1381342 - Ella                       42. 1380346 - Navidad
+
+ 21. 1380337 - Coleccion Thalia           43. 1380350 - Navidad Home
+
+ 22. 1380341 - Belinda Fashion & Chic     44. 1381556 - Navidad Kids
+
+
+
+
+
+================================================================================
+
+7. COMANDOS HABITUALES DE OPERACIÓN (COPIAR Y PEGAR EN POWERSHELL)
+
+================================================================================
+
+
+
+A) ACTIVAR EL ENTORNO VIRTUAL (Siempre al abrir una terminal nueva):
+
+   .\venv\Scripts\activate
+
+
+
+B) INICIAR SESIÓN DE SOCIO (Solo si caduca `data/sesion_vallejo.json`):
+
+   python paso12_login_socio.py
+
+
+
+C) ESCANEAR UN LOTE DE 60 PRODUCTOS DE CATÁLOGO (Costo Socio + Stock Vallejo):
+
+   python paso3_recolector_ligero.py
+
+
+
+D) GENERAR LAS 4 LÁMINAS HD Y SINCRONIZAR EL MOTOR FINANCIERO:
+
+   python paso6_estudio_fotografico.py
+
+
+
+E) ABRIR EL PANEL DE CONTROL EN STREAMLIT:
+
+   streamlit run paso4_panel_control.py
+
+
+
+================================================================================
