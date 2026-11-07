@@ -15,3 +15,14 @@ data/*.db-wal
 data/*.db-shm
 data/imagenes_origen/
 data/simulacion_bulk_ml.json
+
+venv/
+__pycache__/
+.streamlit/
+.intento_web
+*.zip
+*.db
+*.db-wal
+*.db-shm
+data/catalogo_listo/
+data/catalogos_pdf/
