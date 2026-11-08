@@ -1,8 +1,8 @@
-name: Quant-Commerce Vallejo Pipeline ETL
+name: Quant-Commerce Vallejo Pipeline ETL (Fase Analisis)
 
 on:
   schedule:
-    # Ejecuta un lote de 20 SKUs cada 2 horas
+    # Ejecuta un lote de 20 SKUs cada 2 horas para poblar la serie de tiempo
     - cron: '0 */2 * * *'
   workflow_dispatch:
 
@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  ejecutar-etl:
+  ejecutar-etl-analisis:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -35,24 +35,19 @@ jobs:
           pip install curl_cffi pandas streamlit playwright
           playwright install --with-deps chromium
 
-      - name: Fase 1, 2 y 3A - Motor ETL (Tokens React + Curva Decay + SQLite)
+      - name: Ejecutar Motor ETL (Tokens React + Serie de Tiempo + Bayesiano UCB)
         run: python motor_etl_vallejo.py
 
-      - name: Fase 3B - Sincronizador y Baja Automatica Mercado Libre
-        env:
-          ML_ACCESS_TOKEN: ${{ secrets.ML_ACCESS_TOKEN }}
-        run: python paso7_sincronizador_ml.py
-
-      - name: Consolidar WAL y Respaldar Estado en GitHub
+      - name: Consolidar WAL y Respaldar Serie de Tiempo en GitHub
         run: |
           python -c "import sqlite3; c=sqlite3.connect('data/zapateria_vallejo.db'); c.execute('PRAGMA wal_checkpoint(TRUNCATE);'); c.close()"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/zapateria_vallejo.db data/cola_sincronizacion_ml.json simulacion_bulk_ml.json
+          git add data/zapateria_vallejo.db data/cola_sincronizacion_ml.json
           if ! git diff --staged --quiet; then
-            git commit -m "Auto-ETL: Serie de Tiempo + Curva Decay + Bayesiano UCB"
+            git commit -m "Auto-ETL Analisis: Nueva lectura en historial_inventario y calculo UCB"
             git pull --rebase origin main
             git push origin main
           else
-            echo "Sin cambios pendientes por sincronizar."
+            echo "Sin cambios pendientes en la base de datos."
           fi
