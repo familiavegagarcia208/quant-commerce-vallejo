@@ -1,63 +1,58 @@
-name: Quant-Commerce Vallejo Pipeline 24-7
+name: Quant-Commerce Vallejo Pipeline ETL
 
 on:
   schedule:
-    # Corre automáticamente cada 6 horas (00:00, 06:00, 12:00, 18:00 UTC)
-    - cron: '0 */6 * * *'
+    # Ejecuta un lote de 20 SKUs cada 2 horas
+    - cron: '0 */2 * * *'
   workflow_dispatch:
+
+concurrency:
+  group: vallejo-etl-master-lock
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  quant-pipeline:
+  ejecutar-etl:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
     steps:
-      - name: 1. Descargar repositorio
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: 2. Configurar Python 3.11
+      - name: Configurar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: 3. Instalar fuentes del sistema y dependencias
+      - name: Instalar dependencias y motor React (Playwright)
         run: |
-          sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          playwright install chromium
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install curl_cffi pandas streamlit playwright
+          playwright install --with-deps chromium
 
-      - name: 4. Restaurar secretos desde GitHub Secrets
+      - name: Fase 1, 2 y 3A - Motor ETL (Tokens React + Curva Decay + SQLite)
+        run: python motor_etl_vallejo.py
+
+      - name: Fase 3B - Sincronizador y Baja Automatica Mercado Libre
         env:
-          SESSION_JSON: ${{ secrets.SESSION_VALLEJO }}
-          ML_CREDS_JSON: ${{ secrets.ML_CREDENCIALES }}
-        run: |
-          mkdir -p data
-          if [ -n "$SESSION_JSON" ]; then
-            echo "$SESSION_JSON" > data/sesion_vallejo.json
-          fi
-          if [ -n "$ML_CREDS_JSON" ]; then
-            echo "$ML_CREDS_JSON" > data/ml_credenciales.json
-          fi
+          ML_ACCESS_TOKEN: ${{ secrets.ML_ACCESS_TOKEN }}
+        run: python paso7_sincronizador_ml.py
 
-      - name: 5. Paso 3 - Recolector Bayesiano UCB (Vallejo)
-        run: python paso3_recolector_ligero.py
-
-      - name: 6. Paso 5 - Motor Financiero Liquidez y Colchon Poisson
-        run: python paso5_motor_financiero.py
-
-      - name: 7. Paso 6 - Estudio Fotografico B2C (Pillow HD)
-        run: python paso6_estudio_fotografico.py
-
-      - name: 8. Paso 7 - Sincronizador y Generador de Titulos SEO
-        run: python paso7_sincronizador_ml.py --modo dry-run
-
-      - name: 9. Consolidar SQLite WAL y guardar avances en GitHub
+      - name: Consolidar WAL y Respaldar Estado en GitHub
         run: |
           python -c "import sqlite3; c=sqlite3.connect('data/zapateria_vallejo.db'); c.execute('PRAGMA wal_checkpoint(TRUNCATE);'); c.close()"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/zapateria_vallejo.db
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync: Stock Bayesiano + Finanzas + Fotos HD" && git push)
+          git add data/zapateria_vallejo.db data/cola_sincronizacion_ml.json simulacion_bulk_ml.json
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto-ETL: Serie de Tiempo + Curva Decay + Bayesiano UCB"
+            git pull --rebase origin main
+            git push origin main
+          else
+            echo "Sin cambios pendientes por sincronizar."
+          fi
