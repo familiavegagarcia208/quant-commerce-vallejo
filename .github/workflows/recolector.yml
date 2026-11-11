@@ -1,10 +1,15 @@
-name: Quant-Commerce Vallejo Pipeline ETL (Fase Analisis)
+name: Quant-Commerce Vallejo Pipeline ETL (Doble Carril 24/7 + Semanal)
 
 on:
   schedule:
-    # Ejecuta un lote de 20 SKUs cada 2 horas para poblar la serie de tiempo
+    # Corre cada 2 horas (12 veces al día = 84 corridas por semana)
     - cron: '0 */2 * * *'
   workflow_dispatch:
+    inputs:
+      modo_ejecucion:
+        description: 'Modo de corrida (mixto_24_7, solo_top100_meli, barrido_masivo)'
+        required: false
+        default: 'mixto_24_7'
 
 concurrency:
   group: vallejo-etl-master-lock
@@ -19,35 +24,88 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - name: Descargar repositorio
+      - name: 1. Descargar repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Configurar Python 3.11
+      - name: 2. Configurar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Instalar dependencias y motor React (Playwright)
+      - name: 3. Cachear binarios de Chromium (Playwright)
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-v1
+
+      - name: 4. Instalar dependencias y motor React
         run: |
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install curl_cffi pandas streamlit playwright
-          playwright install --with-deps chromium
+          pip install curl_cffi pandas numpy streamlit playwright plotly pillow
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
+            playwright install --with-deps chromium
+          else
+            playwright install-deps chromium
+          fi
 
-      - name: Ejecutar Motor ETL (Tokens React + Serie de Tiempo + Bayesiano UCB)
-        run: python motor_etl_vallejo.py
-
-      - name: Consolidar WAL y Respaldar Serie de Tiempo en GitHub
+      - name: 5. Ejecutar Motor ETL (Carril 24h Top 100 MeLi + Lote Semanal 8,165)
         run: |
-          python -c "import sqlite3; c=sqlite3.connect('data/zapateria_vallejo.db'); c.execute('PRAGMA wal_checkpoint(TRUNCATE);'); c.close()"
+          python motor_etl_vallejo.py
+
+      - name: 6. Consolidar WAL SQLite y Respaldar en /tmp
+        run: |
+          python -c "
+          import sqlite3, pathlib
+          p = pathlib.Path('data/zapateria_vallejo.db')
+          if p.exists():
+              c = sqlite3.connect(str(p))
+              c.execute('PRAGMA wal_checkpoint(TRUNCATE);')
+              c.execute('PRAGMA optimize;')
+              c.close()
+          "
+          cp -f data/zapateria_vallejo.db /tmp/zapateria_vallejo.db.bak
+          if [ -f data/cola_sincronizacion_ml.json ]; then
+            cp -f data/cola_sincronizacion_ml.json /tmp/cola_sincronizacion_ml.json.bak
+          fi
+
+      - name: 7. Commit y Push Atómico (Cero Conflictos de Rebase)
+        run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/zapateria_vallejo.db data/cola_sincronizacion_ml.json
-          if ! git diff --staged --quiet; then
-            git commit -m "Auto-ETL Analisis: Nueva lectura en historial_inventario y calculo UCB"
-            git pull --rebase origin main
-            git push origin main
-          else
-            echo "Sin cambios pendientes en la base de datos."
-          fi
+
+          # Bucle de hasta 3 intentos por si hiciste un push desde tu PC en ese mismo segundo
+          for intento in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+
+            mkdir -p data
+            cp -f /tmp/zapateria_vallejo.db.bak data/zapateria_vallejo.db
+            if [ -f /tmp/cola_sincronizacion_ml.json.bak ]; then
+              cp -f /tmp/cola_sincronizacion_ml.json.bak data/cola_sincronizacion_ml.json
+            fi
+            rm -f data/*.db-wal data/*.db-shm
+
+            git add data/zapateria_vallejo.db
+            if [ -f data/cola_sincronizacion_ml.json ]; then
+              git add data/cola_sincronizacion_ml.json
+            fi
+
+            if git diff --staged --quiet; then
+              echo "Sin cambios pendientes en la base de datos."
+              exit 0
+            fi
+
+            git commit -m "Auto-ETL: Lectura Time-Series, UCB y Cola Top 100 MeLi [skip ci]"
+            if git push origin main; then
+              echo "Push exitoso en el intento $intento."
+              exit 0
+            fi
+            echo "Reintentando sincronización ($intento/3)..."
+            sleep 3
+          done
+          exit 1
