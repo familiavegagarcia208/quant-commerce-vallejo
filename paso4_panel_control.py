@@ -74,7 +74,7 @@ st.markdown(
             color: #F8FAFC;
         }
         div[data-testid="stMetricLabel"] > div { color: #94A3B8 !important; font-weight: 600; }
-        div[data-testid="stMetricValue"] > div { color: #F8FAFC !important; }
+        div[data-testid="stMetricValue"] > div { color: #F8FAFC !important; font-size: 1.45rem !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -434,9 +434,14 @@ with st.sidebar:
 # ==============================================================================
 # 4. CARGA EN MEMORIA (`st.session_state`) USANDO EL LECTOR REAL DE `zapateria_vallejo.db`
 # ==============================================================================
-if "estado_bd_vallejo" not in st.session_state:
-    with st.spinner("Cargando `data/zapateria_vallejo.db` en memoria por única vez..."):
-        st.session_state["estado_bd_vallejo"] = cargar_estado_completo_bd(Config.RUTA_BD)
+mtime_actual_bd = Config.RUTA_BD.stat().st_mtime if Config.RUTA_BD.exists() else 0.0
+if (
+"estado_bd_vallejo" not in st.session_state
+or st.session_state.get("mtime_bd_vallejo") != mtime_actual_bd
+):
+st.session_state["estado_bd_vallejo"] = cargar_estado_completo_bd(Config.RUTA_BD)
+st.session_state["mtime_bd_vallejo"] = mtime_actual_bd
+st.session_state["lecturas_gracia_ucb"] = Config.LECTURAS_GRACIA_UCB
 
 estado_bd = st.session_state["estado_bd_vallejo"]
 df_maestro = estado_bd["df_maestro"].copy()

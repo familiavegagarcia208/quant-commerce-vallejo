@@ -4,10 +4,10 @@
 ZAPATERIA VALLEJO - ARQUITECTURA ETL DE PRODUCCION (REACT SPA + BAYESIANO UCB + MELI 24H)
 ========================================================================================
 Integra integramente:
-1. RepositorioSQLiteETL        : Persistencia en `data/zapateria_vallejo.db` (WAL) + Doble Carril
-                                 y auto-migracion completa de columnas.
-2. ExtractorReactSPA           : Hidratacion de sesion en Price Shoes, clic en tarjeta de
-                                 producto e interceptacion XHR/Fetch + __NEXT_DATA__ + DOM.
+1. RepositorioSQLiteETL        : Persistencia en `data/zapateria_vallejo.db` (WAL), Doble Carril
+                                 y proteccion contra falsos ceros de busqueda.
+2. ExtractorReactSPA           : Hidratacion de sesion en Price Shoes, verificacion estricta de
+                                 ficha de producto e interceptacion XHR/Fetch + __NEXT_DATA__ + DOM.
 3. MotorMatematicoBayesianoUCB : Curva de decaimiento (lambda), Media Bayesiana, Score UCB y
                                  Blindaje Anti-Quiebre a 24 horas para el Top 100 de MeLi.
 4. EstudioFotograficoSinergia  : Renderizador de 4 laminas HD (1200x1200px) para Streamlit.
@@ -62,18 +62,18 @@ except ImportError:
 RUTA_BD = Path("data/zapateria_vallejo.db")
 RUTA_COLA_ML = Path("data/cola_sincronizacion_ml.json")
 
-TAMANO_LOTE_ETL = 25                # SKUs por ejecucion cada 2h (8 Carril A + 17 Carril B)
-CUOTA_CARRIL_A_VIVO = 8             # SKUs del Top 100 MeLi auditados con prioridad 24h
-CUOTA_CARRIL_B_VIVO = 17            # SKUs nuevos/antiguos para avanzar el barrido de 8,165
-TIEMPO_LIMITE_CORRIDA_SEG = 15 * 60 # 15 minutos maximo por corrida en GitHub Actions
-TTL_MAXIMO_TOKEN_SEG = 1200         # Renovacion preventiva de token cada 20 min
-PAUSA_MIN_SEG = 6.0                 # Pausa minima entre productos con sesion viva
-PAUSA_MAX_SEG = 12.0                # Pausa maxima entre productos
+TAMANO_LOTE_ETL = 25
+CUOTA_CARRIL_A_VIVO = 8
+CUOTA_CARRIL_B_VIVO = 17
+TIEMPO_LIMITE_CORRIDA_SEG = 15 * 60
+TTL_MAXIMO_TOKEN_SEG = 1200
+PAUSA_MIN_SEG = 6.0
+PAUSA_MAX_SEG = 12.0
 
-UMBRAL_STOCK_CRITICO = 3            # <= 3 unidades dispara BAJA_AUTOMATICA
-VENTANA_EXPLORACION_MIN_LECTURAS = 4
+UMBRAL_STOCK_CRITICO = 3
+VENTANA_EXPLORACION_MIN_LECTURAS = 2
 DIAS_MAX_ESTANCAMIENTO = 7.0
-TASA_CAIDA_ALERTA_DIARIA = 4.0
+TASA_CAIDA_ALERTA_DIARIA = 2.5
 
 PRIOR_PESO_ALPHA = 2.0
 PRIOR_ROTACION_MU0 = 0.75
@@ -425,7 +425,7 @@ def validar_imagen_bytes(raw: bytes) -> bool:
 
 
 # ==============================================================================
-# 4. CAPA 1: REPOSITORIO SQLITE CON AUTO-MIGRACION COMPLETA Y DOBLE CARRIL
+# 4. CAPA 1: REPOSITORIO SQLITE CON PROTECCION DE STOCK Y DOBLE CARRIL
 # ==============================================================================
 class RepositorioSQLiteETL:
     """Gestiona la persistencia en SQLite en modo WAL y selecciona lotes por Doble Carril."""
@@ -535,6 +535,27 @@ class RepositorioSQLiteETL:
                     conn.execute(
                         f"ALTER TABLE historial_inventario ADD COLUMN {col_h} {tipo_h};"
                     )
+
+            # Limpiar falsos ceros inyectados cuando el buscador no abrio ficha de producto
+            tbs_exist = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table';"
+                ).fetchall()
+            }
+            if "historial_stock_21_dias" in tbs_exist:
+                conn.execute(
+                    """
+                    DELETE FROM historial_inventario
+                    WHERE stock_detectado = 0
+                      AND fuente_extraccion = 'DOM_REACT_HIDRATADO'
+                      AND id_ps IN (
+                          SELECT DISTINCT id_ps
+                          FROM historial_stock_21_dias
+                          WHERE COALESCE(stock_vallejo, 0) > 0
+                      );
+                    """
+                )
             conn.commit()
 
     def obtener_lote_candidatos(
@@ -582,7 +603,7 @@ class RepositorioSQLiteETL:
                     for f in filas
                 ]
 
-            # 1. CARRIL A: Vigilancia 24h de SKUs con stock activo (> 3) cuya lectura tenga > 6h
+            # Priorizar SKUs que ya tienen URL directa de producto (`url_real LIKE 'http%'`)
             cuota_a = min(CUOTA_CARRIL_A_VIVO, max(1, limite // 3))
             filas_a = conn.execute(
                 f"""
@@ -595,7 +616,8 @@ class RepositorioSQLiteETL:
                 WHERE id_ps IS NOT NULL AND TRIM(id_ps) != ''
                   AND (COALESCE(stock_total_anterior, 0) > 3 OR COALESCE(stock_publicable_total, 0) > 3)
                   AND COALESCE(ultima_actualizacion, ultimo_intento, '2000-01-01') <= datetime('now', '-6 hours')
-                ORDER BY COALESCE(tasa_decaimiento, 0.0) DESC,
+                ORDER BY CASE WHEN COALESCE(url_real, '') LIKE 'http%' THEN 0 ELSE 1 END ASC,
+                         COALESCE(tasa_decaimiento, 0.0) DESC,
                          COALESCE(ultima_actualizacion, ultimo_intento, '2000-01-01') ASC
                 LIMIT ?
                 """,
@@ -615,7 +637,6 @@ class RepositorioSQLiteETL:
             ]
             ids_ya = {c.id_ps for c in seleccionados}
 
-            # 2. CARRIL B: Barrido Semanal rotativo (prioriza los nunca consultados o mas antiguos)
             restantes = max(1, limite - len(seleccionados))
             filas_b = conn.execute(
                 f"""
@@ -626,7 +647,8 @@ class RepositorioSQLiteETL:
                        COALESCE(stock_total_anterior, 0) AS stock_prev
                 FROM zapatos_candidatos
                 WHERE id_ps IS NOT NULL AND TRIM(id_ps) != ''
-                ORDER BY COALESCE(ultima_actualizacion, ultimo_intento, '2000-01-01') ASC
+                ORDER BY COALESCE(ultimo_intento, ultima_actualizacion, '2000-01-01') ASC,
+                         CASE WHEN COALESCE(url_real, '') LIKE 'http%' THEN 0 ELSE 1 END ASC
                 LIMIT ?
                 """,
                 (restantes + len(ids_ya),),
@@ -652,7 +674,6 @@ class RepositorioSQLiteETL:
             return seleccionados
 
     def marcar_intento_omitido(self, id_ps: str) -> None:
-        """Actualiza `ultimo_intento` para no atascar la cola en SKUs sin respuesta."""
         with self._conectar() as conn:
             conn.execute(
                 "UPDATE zapatos_candidatos SET ultimo_intento = CURRENT_TIMESTAMP WHERE id_ps = ?;",
@@ -685,6 +706,11 @@ class RepositorioSQLiteETL:
     def guardar_resultado_etl(
         self, dictamen: DictamenTransformacion, url_resuelta: str
     ) -> None:
+        url_limpia = (
+            url_resuelta
+            if (url_resuelta and "/buscar" not in url_resuelta)
+            else ""
+        )
         with self._conectar() as conn:
             conn.execute(
                 """
@@ -739,8 +765,8 @@ class RepositorioSQLiteETL:
                     dictamen.stock_actual,
                     dictamen.stock_actual,
                     dictamen.stock_actual,
-                    url_resuelta,
-                    url_resuelta,
+                    url_limpia,
+                    url_limpia,
                     dictamen.estatus_etl,
                     dictamen.tasa_decaimiento_lambda,
                     dictamen.media_bayesiana,
@@ -762,11 +788,9 @@ class RepositorioSQLiteETL:
 
 
 # ==============================================================================
-# 5. CAPA 2: EXTRACTOR REACT SPA (INTERCEPTOR DE APIs XHR/FETCH + TOKENS + DOM)
+# 5. CAPA 2: EXTRACTOR REACT SPA (BLINDADO CONTRA FALSOS CEROS EN /buscar)
 # ==============================================================================
 class AnalizadorPayloadReact:
-    """Extrae existencias reales inspeccionando arboles JSON de APIs React y el DOM hidratado."""
-
     CLAVES_CANTIDAD = {
         "stock",
         "availablequantity",
@@ -790,9 +814,6 @@ class AnalizadorPayloadReact:
     def buscar_stock_en_json(cls, data: Any, id_ps: str) -> Optional[int]:
         nodos_coincidentes: List[Dict[str, Any]] = []
         cls._recolectar_nodos_sku(data, id_ps, nodos_coincidentes)
-
-        if not nodos_coincidentes and isinstance(data, dict):
-            nodos_coincidentes = [data]
 
         for nodo in nodos_coincidentes:
             stock_calculado = cls._extraer_unidades_de_nodo(nodo)
@@ -874,11 +895,6 @@ class AnalizadorPayloadReact:
 
 
 class ExtractorReactSPA:
-    """
-    Motor de extraccion que ejecuta el ciclo de vida de React, intercepta los tokens
-    generados por el frontend y captura las respuestas JSON de la API interna.
-    """
-
     def __init__(self) -> None:
         self._playwright = None
         self._browser: Optional[Browser] = None
@@ -995,9 +1011,14 @@ class ExtractorReactSPA:
             self._renovar_contexto_y_token()
 
         self._respuestas_json_sku.clear()
+        tiene_url_directa = bool(
+            candidato.url_real
+            and candidato.url_real.startswith("http")
+            and "/buscar" not in candidato.url_real
+        )
         url_destino = (
             candidato.url_real
-            if (candidato.url_real and candidato.url_real.startswith("http"))
+            if tiene_url_directa
             else f"https://www.priceshoes.com/buscar?q={candidato.id_ps}"
         )
 
@@ -1010,9 +1031,6 @@ class ExtractorReactSPA:
                 self._page.wait_for_timeout(2500)
 
             if self.token_requiere_refresh:
-                print(
-                    "    🔄 [React Token Manager] Token expirado detectado en trafico XHR. Renovando..."
-                )
                 self._renovar_contexto_y_token()
                 self._respuestas_json_sku.clear()
                 self._page.goto(
@@ -1032,8 +1050,9 @@ class ExtractorReactSPA:
                         pass
 
             url_final = self._page.url
+            en_buscador_sin_ficha = "/buscar" in url_final
 
-            # ESTRATEGIA 1: Paquetes JSON interceptados de la API de React
+            # ESTRATEGIA 1: Paquetes JSON interceptados que contengan explicitamente el id_ps
             for payload in reversed(self._respuestas_json_sku):
                 stock_api = AnalizadorPayloadReact.buscar_stock_en_json(
                     payload, candidato.id_ps
@@ -1055,13 +1074,13 @@ class ExtractorReactSPA:
             if resultado_ssr is not None:
                 return resultado_ssr
 
-            # ESTRATEGIA 3: Evaluar el DOM renderizado de React (Tallas activas vs Producto agotado)
+            # Si sigue en `/buscar` y no abrio la ficha del producto, NO devolver falso 0
+            if en_buscador_sin_ficha:
+                return None
+
+            # ESTRATEGIA 3: Evaluar DOM solo cuando estamos dentro de una ficha de producto real
             stock_dom = self._page.evaluate(
                 """(sku) => {
-                    const texto = (document.body.innerText || '').toLowerCase();
-                    if (texto.includes('no encontramos resultados') || texto.includes('0 resultados') || texto.includes('producto agotado')) {
-                        return 0;
-                    }
                     const selectoresTallas = document.querySelectorAll(
                         '[data-testid*="size"]:not([disabled]), [class*="size"]:not([disabled]):not([class*="disabled"]), button[class*="talla"]:not([disabled])'
                     );
@@ -1073,8 +1092,12 @@ class ExtractorReactSPA:
                         }
                     });
                     if (tallasActivas > 0) return tallasActivas * 2;
-                    if (texto.includes('agregar al carrito') || texto.includes('comprar ahora') || texto.includes('disponible')) {
+                    const texto = (document.body.innerText || '').toLowerCase();
+                    if (texto.includes('agregar al carrito') || texto.includes('comprar ahora')) {
                         return 6;
+                    }
+                    if (texto.includes('producto agotado') || texto.includes('sin existencias')) {
+                        return 0;
                     }
                     return null;
                 }""",
@@ -1132,15 +1155,6 @@ class ExtractorReactSPA:
                 if stock_ld is not None:
                     return LecturaExtraida(
                         id_ps, stock_ld, url_actual, "LD_JSON_SCHEMA", True
-                    )
-                texto_ld = bloque.lower()
-                if "outofstock" in texto_ld:
-                    return LecturaExtraida(
-                        id_ps, 0, url_actual, "LD_JSON_SCHEMA", True
-                    )
-                if "instock" in texto_ld:
-                    return LecturaExtraida(
-                        id_ps, 8, url_actual, "LD_JSON_SCHEMA", True
                     )
             except Exception:
                 pass
@@ -1377,9 +1391,13 @@ def evaluar_dataframe_quant(
         elif lec > gracia_ucb and dias >= lim_dias and dlt == 0 and dias > 0:
             est = "BAJA_AUTOMATICA"
             mot = f"Estancado ({dias:.1f} dias >= {lim_dias:.1f})"
-        elif dec >= lim_lambda:
+        elif dec >= lim_lambda or dlt < 0 or (stk <= lim_baja + 2):
             est = "ALERTA_DECAY"
-            mot = f"Caida Rapida lambda ({dec:.2f} >= {lim_lambda:.2f})"
+            mot = (
+                f"Caida Rapida lambda ({dec:.2f})"
+                if dec >= lim_lambda or dlt < 0
+                else f"Stock cercano a reserva ({stk} u.)"
+            )
         elif lec <= gracia_ucb:
             est = "EXPLORACION_UCB"
             mot = f"En gracia UCB ({lec}/{gracia_ucb} lecturas) · Stock ({stk})"
@@ -1738,8 +1756,9 @@ def cargar_estado_completo_bd(
                 )
                 df_h21["fecha_str"] = col_txt(df_h21, "fecha", "")
 
+                # Cada talla auditada cuenta como verificacion de inventario
                 mapa_lec_21 = (
-                    df_h21.groupby("sku", sort=False)["fecha_str"]
+                    df_h21.groupby("sku", sort=False)["variante"]
                     .nunique()
                     .to_dict()
                 )
@@ -1870,10 +1889,17 @@ def cargar_estado_completo_bd(
             or (est_c != "" and est_c.upper() not in ("PENDIENTE", "NONE", "NAN"))
         )
 
-        if en_hi:
-            stk_v = mapa_stk_hi[sku_id]
+        # Proteger el stock verificado por talla en `historial_stock_21_dias` contra falsos ceros
+        stk_21_val = mapa_stk_21.get(sku_id, 0)
+        stk_hi_val = mapa_stk_hi.get(sku_id, 0)
+        if en_hi and stk_hi_val > 0:
+            stk_v = stk_hi_val
+        elif en_21 and stk_21_val > 0:
+            stk_v = stk_21_val
+        elif en_hi:
+            stk_v = stk_hi_val
         elif en_21:
-            stk_v = mapa_stk_21[sku_id]
+            stk_v = stk_21_val
         else:
             stk_v = s_c_max
 
@@ -2226,17 +2252,15 @@ class OrquestadorPipelineETL:
                             f"\n[{idx}/{len(candidatos)} | {candidato.carril}] SKU {candidato.id_ps} - {candidato.nombre_modelo[:40]}"
                         )
 
-                        # 1. EXTRACT (Con ExtractorReactSPA original)
                         lectura = self.extractor.extraer_sku(candidato)
                         if lectura is None:
                             omitidos += 1
                             self.repo.marcar_intento_omitido(candidato.id_ps)
                             print(
-                                "    ⚠️ [Extract] Sin estructura verificable; se registra intento para avanzar la cola."
+                                "    ⚠️ [Extract] Sin ficha verificable; se preserva stock previo y avanza la cola."
                             )
                             continue
 
-                        # 2. TRANSFORM (Con MotorMatematicoBayesianoUCB original)
                         total_global, historial_sku = (
                             self.repo.obtener_historial_sku(candidato.id_ps)
                         )
@@ -2248,7 +2272,6 @@ class OrquestadorPipelineETL:
                             historial_sku=historial_sku,
                         )
 
-                        # 3. LOAD EN SQLITE (`historial_inventario` + `zapatos_candidatos`)
                         self.repo.guardar_resultado_etl(
                             dictamen, lectura.url_resuelta
                         )
@@ -2265,7 +2288,6 @@ class OrquestadorPipelineETL:
                 finally:
                     self.extractor.cerrar()
 
-        # Recalcular toda la base maestra (8,165 SKUs) y exportar `data/cola_sincronizacion_ml.json`
         estado = cargar_estado_completo_bd(RUTA_BD)
         df_maestro = estado["df_maestro"]
         carril_a, carril_b = seleccionar_lote_doble_carril(df_maestro)
@@ -2291,11 +2313,15 @@ class OrquestadorPipelineETL:
 
         self.repo.consolidar_wal()
 
+        activos_sanos = int((df_evaluado["estatus_simulado"] == "ACTIVO_SANO").sum())
+        en_exp = int((df_evaluado["estatus_simulado"] == "EXPLORACION_UCB").sum())
+        en_decay = int((df_evaluado["estatus_simulado"] == "ALERTA_DECAY").sum())
+
         print("\n" + "=" * 92)
         print(
-            f"✅ RESUMEN ETL | Nuevos auditados en vivo: {exitosos} (Bajas: {bajas} | Omitidos: {omitidos}) | "
-            f"Catalogo: {meta['catalogo_maestro_total']:,} | Total Auditados BD: {meta['skus_auditados_total']:,} | "
-            f"Top 100 MeLi Listos: {meta['total_top_100_meli']}"
+            f"✅ RESUMEN ETL | Auditados BD: {meta['skus_auditados_total']:,} | "
+            f"Activos Sanos: {activos_sanos:,} | Exploracion UCB: {en_exp:,} | Alerta Decay: {en_decay:,} | "
+            f"Top 100 MeLi: {meta['total_top_100_meli']}"
         )
         print("=" * 92)
 
