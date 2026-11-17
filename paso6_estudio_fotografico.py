@@ -1,60 +1,44 @@
+# -*- coding: utf-8 -*-
 """
 ========================================================================================
-PASO 6: ESTUDIO FOTOGRÁFICO HD (EXCLUSIVO PARA LOS 44 CATÁLOGOS PDF OFICIALES)  · v2 corregida
+PASO 6: ESTUDIO FOTOGRAFICO HD + EXTRACTOR TURBO PARA CUADRANTES VERDES ("EMPEZAR AQUI")
 ========================================================================================
-Genera el carrusel comercial en 1200x1200 px (1:1 HD) únicamente para productos que
-provienen de los catálogos PDF oficiales, descartando cualquier residuo externo:
-  - 01_portada_blanca.jpg   : 1.ª foto oficial maximizada en fondo blanco puro
-  - 02_angulo_galeria.jpg   : 2.ª foto oficial extraída de Price Shoes (0° rotación)
-  - 03_ficha_beneficios.jpg : Diseño comercial de 2 columnas + chips azules de stock real
-  - 04_guia_tallas_cm.jpg   : Tabla doble columna con tallas intermedias + 3 pasos de medición
-  (cada lámina se guarda también como 01.jpg … 04.jpg, que es lo que lee el panel Streamlit)
-
-Correcciones de esta versión (respecto a la original)
------------------------------------------------------
- 1. ¡La carga del catálogo ya NO borra datos! Antes ejecutaba un DELETE sobre
-    `zapatos_candidatos` y eliminaba para siempre los productos "Sin Catálogo (Web)"
-    (que el panel Streamlit sí muestra). Ahora solo los ignora al leer.
- 2. Ya no se inventa disponibilidad: sin datos reales de tallas, las láminas 03 y 04
-    dejaban "DISPONIBLE" con tallas por defecto (p. ej. 23.5, 24.5, 25.0) aunque no
-    hubiera stock de ellas. Ahora solo se muestran tallas reales; las presentaciones fijas
-    (perfumería, hogar, accesorios) conservan su valor por defecto.
- 3. IDs robustos: "PS-00123", "123.0" y "00123" se reconocen como el mismo producto.
- 4. Costos/stock con formato "$1,250.50" o "5.0" ya no rompen la carga (ValueError).
- 5. Tallas con coma decimal ("22,5") se normalizan igual que las de punto.
- 6. Clasificador: "con cordones" / "con agujetas" / "horma" en un zapato ya no lo
-    convierte en "plantilla/cuidado"; un zapato con solo la talla 22 en stock ya no se
-    clasifica como infantil.
- 7. Las depuraciones ya no hacen `rmtree` directo: las carpetas fuera de catálogo se
-    mueven a `data/catalogo_descartado` (cambia ELIMINAR_DESCARTADAS para borrarlas).
- 8. Los productos sin 2.ª foto ya no vuelven a consumir descargas web en cada corrida
-    (marca `.intento_web`, reintento a los REINTENTO_DIAS días).
- 9. Descargas: un 404/410 ya no se reintenta con 3 navegadores + urllib por cada URL
-    adivinada; las expresiones regulares escapan el ID.
-10. Más de 8 tallas: ahora caben hasta 10 chips y se avisa "+N tallas más" (antes se
-    cortaban en silencio). Títulos demasiado largos se acortan con "..." en vez de
-    chocar con la insignia.
-11. Salida UTF-8 forzada (los emojis de los mensajes fallaban al redirigir en Windows),
-    JPEG sin submuestreo de color (texto azul más nítido) y errores de lectura de
-    tallas reportados en lugar de silenciados.
+1. Extrae en paralelo (10 hilos) el costo de socio, precio público, nombre y URLs de
+   galería de TODOS los productos de los 4 Cuadrantes Verdes ("Empezar aquí"):
+   - Calzado escolar (Niños 0-12)
+   - Tenis con licencia (Niños 0-12)
+   - Sandalias y botas de moda (Adultos 25-54)
+   - Pantuflas (Adultos 25-54)
+2. Descarga en paralelo las fotos oficiales y genera las 4 láminas HD (1200x1200 px):
+   - 01_portada_blanca.jpg
+   - 02_angulo_galeria.jpg
+   - 03_ficha_beneficios.jpg
+   - 04_guia_tallas_cm.jpg
+3. Sincroniza automáticamente `paso5_motor_financiero.py` al finalizar.
+========================================================================================
 """
 
 from __future__ import annotations
 
 import ast
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from io import BytesIO
 import json
-import random
+import os
+from pathlib import Path
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
-import time
 import urllib.request
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 try:
     from curl_cffi import requests as tls_requests
@@ -63,54 +47,22 @@ except ImportError:
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageOps, ImageStat
 
+import inventario_tiendas as inv
+
 RUTA_BD: Path = Path("data/zapateria_vallejo.db")
 DIR_CATALOGO_LISTO: Path = Path("data/catalogo_listo")
-DIR_DESCARTADOS: Path = Path("data/catalogo_descartado")
-MAX_DESCARGAS_WEB_POR_CORRIDA: int = 40
 
-# True = borrar carpetas fuera de catálogo; False (recomendado) = moverlas a DIR_DESCARTADOS.
-ELIMINAR_DESCARTADAS: bool = False
-# Días que se espera antes de volver a buscar en la web la foto que faltó.
-REINTENTO_DIAS: int = 7
-MARCA_INTENTO_WEB: str = ".intento_web"
-# Máximo de chips de talla en la lámina 03 (el resto se resume como "+N tallas más").
-MAX_CHIPS_03: int = 10
-# Perfiles cuya "talla" por defecto es una presentación fija (no una talla real de stock).
-TIPOS_CON_PRESENTACION_FIJA = {"perfumeria", "hogar_cocina", "accesorios"}
-# Opciones de guardado JPEG: sin submuestreo de color para que el texto no se vea borroso.
-OPCIONES_JPEG: Dict[str, Any] = {"quality": 95, "subsampling": 0, "optimize": True}
+# Límite amplio para procesar todos los verdes en una sola corrida (configurable por entorno)
+MAX_DESCARGAS_WEB_POR_CORRIDA: int = int(os.environ.get("MAX_FOTOS_CORRIDA", "1500"))
+MAX_HILOS_DESCARGA: int = int(os.environ.get("MAX_HILOS_FOTOS", "10"))
+FORZAR_RERENDER_COMPLETOS: bool = False
 
-# Valores de `origen_catalogo` que significan "no viene de un PDF oficial".
-ORIGENES_NO_PDF = {"", "none", "null", "nan", "sin catálogo (web)"}
-
-
-# ======================================================================================
-# UTILIDADES GENERALES
-# ======================================================================================
-def configurar_salida() -> None:
-    """Fuerza UTF-8 en consola/tubería: los emojis fallan con cp1252 al redirigir en Windows."""
-    for flujo in (sys.stdout, sys.stderr):
-        try:
-            flujo.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass
-
-
-def normalizar_id(valor: Any) -> str:
-    """'PS-00123' / '00123' / '123.0' → '123' (si todo son ceros, se conserva)."""
-    s = re.sub(r"\.0+$", "", str(valor).strip())
-    s = re.sub(r"^PS-", "", s, flags=re.IGNORECASE)
-    return s.lstrip("0") or s
-
-
-def a_float(valor: Any, default: float = 0.0) -> float:
-    """Convierte '$1,250.50', '5', 5.0 o None a float sin lanzar excepciones."""
-    if valor is None:
-        return default
-    try:
-        return float(re.sub(r"[$,\s]", "", str(valor)))
-    except ValueError:
-        return default
+LAMINAS_REQUERIDAS = (
+    "01_portada_blanca.jpg",
+    "02_angulo_galeria.jpg",
+    "03_ficha_beneficios.jpg",
+    "04_guia_tallas_cm.jpg",
+)
 
 
 # ======================================================================================
@@ -141,27 +93,17 @@ def cargar_fuente(tamano: int, negrita: bool = False):
         if Path(r).exists():
             try:
                 return ImageFont.truetype(r, tamano)
-            except OSError:
+            except Exception:
                 pass
     return ImageFont.load_default()
 
 
 def ajustar_fuente(draw, texto, ancho_max, tam_max, tam_min=11, negrita=False):
-    """Devuelve la fuente más grande (entre tam_max y tam_min) con la que el texto cabe en ancho_max."""
     for tam in range(tam_max, tam_min - 1, -1):
         f = cargar_fuente(tam, negrita)
         if draw.textlength(texto, font=f) <= ancho_max:
             return f
     return cargar_fuente(tam_min, negrita)
-
-
-def recortar_con_puntos(draw, texto: str, fuente, ancho_max: float) -> str:
-    """Acorta `texto` con '...' si aun con la fuente más pequeña no cabe en `ancho_max`."""
-    if draw.textlength(texto, font=fuente) <= ancho_max:
-        return texto
-    while texto and draw.textlength(texto + "...", font=fuente) > ancho_max:
-        texto = texto[:-1]
-    return texto.rstrip() + "..."
 
 
 def envolver_texto(draw, texto, fuente, ancho_max):
@@ -194,7 +136,7 @@ def texto_centrado(draw, x0, x1, y, texto, fuente, fill):
 
 
 # ======================================================================================
-# LIMPIEZA DE TÍTULOS E IMÁGENES
+# LIMPIEZA DE TITULOS E IMAGENES
 # ======================================================================================
 def limpiar_titulo(nombre: str) -> str:
     limpio = re.sub(r"\b(caja|env[ií]o\s*hoy|sku|id|ps)\b", "", str(nombre), flags=re.IGNORECASE)
@@ -249,7 +191,7 @@ def son_imagenes_iguales(img1: Image.Image, img2: Image.Image, revisar_espejo: b
             if ImageStat.Stat(ImageChops.difference(c1, c2_flip)).mean[0] < 11.0:
                 return True
         return False
-    except (ValueError, OSError):
+    except Exception:
         return False
 
 
@@ -260,208 +202,241 @@ def tiene_lupa_o_rotacion_vieja(img: Image.Image) -> bool:
         rgb = img.convert("RGB")
         p1, p2 = rgb.getpixel((970, 385)), rgb.getpixel((970, 53))
         return (p1[0] < 45 and p1[1] < 50 and p1[2] < 70) and (p2[0] < 45 and p2[1] < 50 and p2[2] < 70)
-    except (ValueError, OSError, IndexError):
+    except Exception:
         return False
 
 
 # ======================================================================================
 # TALLAS Y BASE DE DATOS
 # ======================================================================================
-_ORDEN_LETRAS = ["XCH", "XS", "CH", "S", "CH-M", "M", "M-G", "G", "L", "XG", "XL", "2XG", "XXL", "UNI", "UNITALLA"]
+_ORDEN_LETRAS = ["XCH", "XS", "CH", "S", "CH-M", "M", "M-G", "G", "L", "XG", "XL", "2XG", "XXL", "UNI"]
 
 
 def clave_talla(t: str):
-    """Orden natural: tallas numéricas de menor a mayor y luego las de letras (CH, M, G…)."""
     try:
-        valor = float(t)
-        if valor == valor and abs(valor) != float("inf"):  # descarta "nan"/"inf"
-            return (0, valor, "")
+        return (0, float(t), "")
     except ValueError:
-        pass
-    return (1, _ORDEN_LETRAS.index(t) if t in _ORDEN_LETRAS else 99, t)
+        return (1, _ORDEN_LETRAS.index(t) if t in _ORDEN_LETRAS else 99, t)
+
+
+_VALORES_SIN_TALLAS = ("{}", "[]", "None", "null", "0")
+_PATRON_TALLAS_CSV = (
+    r"^(?:1\d|2\d|3[0-2]|X?CH|M|G|X+G|S|L|XL|UNI)(?:\.[05])?"
+    r"(?:\s*,\s*(?:1\d|2\d|3[0-2]|X?CH|M|G|X+G|S|L|XL|UNI)(?:\.[05])?)+$"
+)
+
+
+def _tallas_de_dict(d: Any) -> Optional[List[str]]:
+    if not isinstance(d, dict):
+        return None
+    return [str(k).strip() for k, v in d.items() if float(v or 0) > 0]
+
+
+def _tallas_de_lista(lst: Any) -> Optional[List[str]]:
+    if not isinstance(lst, list):
+        return None
+    return [str(x).strip() for x in lst if str(x).strip()]
+
+
+def _interpretar_literal(s: str, convertir) -> Optional[List[str]]:
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            resultado = convertir(loader(s))
+            if resultado is not None:
+                return resultado
+        except Exception:
+            pass
+    return None
 
 
 def parsear_tallas_valor(val: Any) -> List[str]:
     if not val:
         return []
     s = str(val).strip()
-    if not s or s in ("{}", "[]", "None", "null", "0"):
+    if not s or s in _VALORES_SIN_TALLAS:
         return []
-    if s.startswith("{") and s.endswith("}"):
-        for loader in (json.loads, ast.literal_eval):
-            try:
-                d = loader(s)
-                if isinstance(d, dict):
-                    return [str(k).strip() for k, v in d.items() if float(v or 0) > 0]
-            except (ValueError, TypeError, SyntaxError):
-                pass
-    if s.startswith("[") and s.endswith("]"):
-        for loader in (json.loads, ast.literal_eval):
-            try:
-                lst = loader(s)
-                if isinstance(lst, list):
-                    return [str(x).strip() for x in lst if str(x).strip()]
-            except (ValueError, TypeError, SyntaxError):
-                pass
-    patron_csv = r"^(?:1\d|2\d|3[0-2]|X?CH|M|G|X+G|S|L|XL|UNI)(?:\.[05])?(?:\s*,\s*(?:1\d|2\d|3[0-2]|X?CH|M|G|X+G|S|L|XL|UNI)(?:\.[05])?)+$"
-    if re.search(patron_csv, s, re.IGNORECASE):
+
+    for apertura, cierre, convertir in (("{", "}", _tallas_de_dict), ("[", "]", _tallas_de_lista)):
+        if s.startswith(apertura) and s.endswith(cierre):
+            tallas = _interpretar_literal(s, convertir)
+            if tallas is not None:
+                return tallas
+
+    if re.search(_PATRON_TALLAS_CSV, s, re.IGNORECASE):
         return [x.strip() for x in s.split(",") if x.strip()]
     return []
 
 
 def normalizar_etiqueta_talla(t: str) -> str:
-    """'22' → '22.0', '22,5' → '22.5', 'ch' → 'CH' (quita 'MX' y 'CM')."""
-    t_str = str(t).upper().replace("MX", "").replace("CM", "").replace(",", ".").strip()
+    t_str = str(t).upper().replace("MX", "").replace("CM", "").strip()
     m = re.match(r"^(\d+)(?:\.(\d+))?$", t_str)
     if m:
         return f"{int(m.group(1))}.5" if m.group(2) in ("5", "50") else f"{int(m.group(1))}.0"
     return t_str
 
 
-def obtener_unidad_chip(talla_limpia: str, unidad_perfil: str) -> str:
-    """
-    Si la talla contiene letras (CH, M, G, XG, UNI, UNITALLA), muestra 'TALLA MX'
-    para nunca imprimir 'CM MX' debajo de una letra.
-    """
-    t = str(talla_limpia).strip().upper()
-    if unidad_perfil in ("PRESENTACIÓN", "MEDIDA CM"):
-        return unidad_perfil
-    if re.match(r"^\d+(?:\.\d+)?$", t):
-        return unidad_perfil
-    return "TALLA MX"
+def _claves_sku(valor: Any) -> Tuple[str, str]:
+    k = str(valor).strip().replace("PS-", "")
+    return k, (k.lstrip("0") or k)
 
 
-def cargar_catalogo_sqlite() -> Dict[str, Dict[str, Any]]:
-    """
-    Carga SOLO LECTURA de los productos con `origen_catalogo` asignado (catálogos PDF
-    oficiales). Los demás registros se ignoran, pero NO se borran de la base de datos
-    (el panel Streamlit los muestra como "Sin Catálogo (Web)").
+def _columnas_tabla(conn: sqlite3.Connection, tabla: str) -> List[str]:
+    return [c[1] for c in conn.execute(f'PRAGMA table_info("{tabla}")').fetchall()]
 
-    Devuelve {id_normalizado: registro}; el registro también queda accesible con el id
-    tal como viene en la BD (p. ej. "PS-00123").
-    """
-    productos: Dict[str, Dict[str, Any]] = {}
-    if not RUTA_BD.exists():
-        return productos
 
-    conn = sqlite3.connect(RUTA_BD)
+def _purgar_filas_sin_catalogo(conn: sqlite3.Connection) -> None:
+    if "origen_catalogo" not in _columnas_tabla(conn, "zapatos_candidatos"):
+        return
+    conn.execute(
+        """
+        DELETE FROM zapatos_candidatos
+        WHERE origen_catalogo IS NULL
+           OR TRIM(origen_catalogo) = ''
+           OR LOWER(TRIM(origen_catalogo)) IN ('none', 'null', 'nan', 'sin catálogo (web)')
+        """
+    )
+    conn.commit()
+
+
+def _leer_tallas_columna_talla(
+    conn: sqlite3.Connection, tabla: str, col_id: str, cols: List[str], tallas_por_sku: Dict[str, List[str]]
+) -> None:
+    if "cantidad" in cols:
+        cond = " WHERE cantidad > 0 "
+    elif "stock_vallejo" in cols:
+        cond = " WHERE stock_vallejo > 0 "
+    elif "stock" in cols:
+        cond = " WHERE stock > 0 "
+    else:
+        cond = ""
+    for r_id, r_t in conn.execute(f'SELECT {col_id}, talla FROM "{tabla}"{cond}').fetchall():
+        t_norm = normalizar_etiqueta_talla(str(r_t))
+        for clave in _claves_sku(r_id):
+            tallas_por_sku.setdefault(clave, [])
+            if t_norm not in tallas_por_sku[clave]:
+                tallas_por_sku[clave].append(t_norm)
+
+
+def _leer_tallas_columnas_json(
+    conn: sqlite3.Connection, tabla: str, col_id: str, cols: List[str], tallas_por_sku: Dict[str, List[str]]
+) -> None:
+    cols_j = [
+        c for c in cols
+        if any(p in c.lower() for p in ("talla", "corrida", "stock_json", "inventario")) and c.lower() != "talla"
+    ]
+    if not cols_j:
+        return
+    for fila_j in conn.execute(f'SELECT {col_id}, {", ".join(cols_j)} FROM "{tabla}"').fetchall():
+        k, k_sin = _claves_sku(fila_j[0])
+        for val_col in fila_j[1:]:
+            ext = [normalizar_etiqueta_talla(x) for x in parsear_tallas_valor(val_col)]
+            if ext:
+                tallas_por_sku[k] = ext
+                tallas_por_sku[k_sin] = ext
+
+
+def _leer_tallas_de_tabla(conn: sqlite3.Connection, tabla: str, tallas_por_sku: Dict[str, List[str]]) -> None:
+    cols = _columnas_tabla(conn, tabla)
+    col_id = next((c for c in cols if c.lower() in ("id_ps", "sku", "id_producto")), None)
+    if not col_id:
+        return
+    if "talla" in cols:
+        _leer_tallas_columna_talla(conn, tabla, col_id, cols, tallas_por_sku)
+    _leer_tallas_columnas_json(conn, tabla, col_id, cols, tallas_por_sku)
+
+
+def _reunir_tallas_por_sku(conn: sqlite3.Connection, tablas) -> Dict[str, List[str]]:
+    tallas_por_sku: Dict[str, List[str]] = {}
+    for t_nom in tablas:
+        try:
+            _leer_tallas_de_tabla(conn, t_nom, tallas_por_sku)
+        except Exception:
+            pass
+    return tallas_por_sku
+
+
+def _registro_producto(
+    fila: tuple, tallas_por_sku: Dict[str, List[str]], stock_tienda_map: Dict[str, int]
+) -> Dict[str, Any]:
+    id_ps, nombre, costo, url_r, marca, corte, origen, stock_ant, tipo_prod = fila
+    id_str = str(id_ps).strip()
+    id_sin = id_str.lstrip("0") or id_str
+    stk_real = max(int(stock_ant or 0), stock_tienda_map.get(id_str, 0), stock_tienda_map.get(id_sin, 0))
+    nom_limpio = limpiar_titulo(nombre or "Calzado Selección Oficial")
+    etapa_m, cuad_m = inv.clasificar_matriz_maslow(nom_limpio, str(origen).strip(), str(tipo_prod).strip())
+
+    return {
+        "id_ps": id_str,
+        "id_limpio": id_sin,
+        "nombre": nom_limpio,
+        "costo": float(costo or 0.0),
+        "url_real": str(url_r).strip(),
+        "marca": str(marca).strip() or "CATÁLOGO OFICIAL",
+        "corte": str(corte).strip(),
+        "origen_catalogo": str(origen).strip(),
+        "stock": stk_real,
+        "etapa_maslow": etapa_m,
+        "cuadrante": cuad_m,
+        "es_verde": etapa_m == inv.ETAPA_VERDE,
+        "tallas_lista": sorted(
+            tallas_por_sku.get(id_str) or tallas_por_sku.get(id_sin) or [], key=clave_talla
+        ),
+    }
+
+
+def _leer_productos_catalogo(conn: sqlite3.Connection, tallas_por_sku: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+    cols_zc = _columnas_tabla(conn, "zapatos_candidatos")
+
+    def columna(nombre: str, default: str) -> str:
+        return nombre if nombre in cols_zc else default
+
+    stock_tienda_map: Dict[str, int] = {}
     try:
-        tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        tallas_por_sku: Dict[str, List[str]] = {}
+        for r_id, r_sum in conn.execute("SELECT id_ps, SUM(cantidad) FROM stock_tienda GROUP BY id_ps").fetchall():
+            k, k_s = _claves_sku(r_id)
+            stock_tienda_map[k] = max(stock_tienda_map.get(k, 0), int(r_sum or 0))
+            stock_tienda_map[k_s] = max(stock_tienda_map.get(k_s, 0), int(r_sum or 0))
+    except Exception:
+        pass
 
-        for t_nom in tablas:
-            try:
-                cols = [c[1] for c in conn.execute(f'PRAGMA table_info("{t_nom}")').fetchall()]
-                col_id = next((c for c in cols if c.lower() in ("id_ps", "sku", "id_producto")), None)
-                if not col_id:
-                    continue
-                if "talla" in cols:
-                    if "stock_vallejo" in cols:
-                        cond = " WHERE stock_vallejo > 0 "
-                    elif "stock" in cols:
-                        cond = " WHERE stock > 0 "
-                    elif "existencias" in cols:
-                        cond = " WHERE existencias > 0 "
-                    else:
-                        cond = ""
-                    for r_id, r_t in conn.execute(f'SELECT "{col_id}", talla FROM "{t_nom}"{cond}').fetchall():
-                        lista = tallas_por_sku.setdefault(normalizar_id(r_id), [])
-                        t_norm = normalizar_etiqueta_talla(str(r_t))
-                        if t_norm and t_norm not in lista:
-                            lista.append(t_norm)
-                cols_j = [
-                    c for c in cols
-                    if any(p in c.lower() for p in ("talla", "corrida", "stock_json", "inventario")) and c.lower() != "talla"
-                ]
-                if cols_j:
-                    seleccion = ", ".join(f'"{c}"' for c in cols_j)
-                    for fila_j in conn.execute(f'SELECT "{col_id}", {seleccion} FROM "{t_nom}"').fetchall():
-                        k = normalizar_id(fila_j[0])
-                        for val_col in fila_j[1:]:
-                            ext = [normalizar_etiqueta_talla(x) for x in parsear_tallas_valor(val_col)]
-                            if ext:
-                                tallas_por_sku[k] = ext
-            except sqlite3.Error as e:
-                print(f"⚠️ No se pudieron leer tallas de la tabla '{t_nom}': {e}")
+    c_orig = columna("origen_catalogo", "''")
+    filas = conn.execute(
+        f"SELECT id_ps, COALESCE(nombre_modelo,''), COALESCE(costo_socio,0.0), COALESCE(url_real,''), "
+        f"COALESCE({columna('marca_extraida', chr(39) * 2)},''), COALESCE({columna('material_corte', chr(39) * 2)},''), "
+        f"COALESCE({c_orig},''), COALESCE({columna('stock_total_anterior', '0')},0), "
+        f"COALESCE({columna('tipo_producto', chr(39) * 2)},'') "
+        f"FROM zapatos_candidatos WHERE COALESCE({c_orig}, '') != ''"
+    ).fetchall()
 
-        if "zapatos_candidatos" not in tablas:
-            return productos
-        cols_zc = [c[1] for c in conn.execute("PRAGMA table_info(zapatos_candidatos)").fetchall()]
-        if "origen_catalogo" not in cols_zc:
-            print("⚠️ `zapatos_candidatos` no tiene la columna `origen_catalogo`: no hay productos de catálogo PDF.")
-            return productos
-
-        c_marca = "marca_extraida" if "marca_extraida" in cols_zc else "''"
-        c_corte = "material_corte" if "material_corte" in cols_zc else "''"
-        c_stock = "stock_total_anterior" if "stock_total_anterior" in cols_zc else "0"
-        filas = conn.execute(
-            f"SELECT id_ps, COALESCE(nombre_modelo,''), COALESCE(costo_socio,0.0), COALESCE(url_real,''), "
-            f"COALESCE({c_marca},''), COALESCE({c_corte},''), COALESCE(origen_catalogo,''), COALESCE({c_stock},0) "
-            f"FROM zapatos_candidatos"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    for id_ps, nombre, costo, url_r, marca, corte, origen, stock in filas:
-        origen = str(origen).strip()
-        if origen.lower() in ORIGENES_NO_PDF:  # se filtra en Python: SQLite LOWER() no maneja acentos
-            continue
-        id_raw = str(id_ps).strip()
-        id_l = normalizar_id(id_raw)
-        reg = {
-            "id_ps": id_raw,
-            "id_limpio": id_l,
-            "nombre": limpiar_titulo(nombre or "Calzado Selección Oficial"),
-            "costo": a_float(costo),
-            "url_real": str(url_r).strip(),
-            "marca": str(marca).strip() or "CATÁLOGO OFICIAL",
-            "corte": str(corte).strip(),
-            "origen_catalogo": origen,
-            "stock": max(0, int(a_float(stock))),
-            "tallas_lista": sorted(tallas_por_sku.get(id_l, []), key=clave_talla),
-        }
-        productos[id_l] = reg
-        productos[id_raw] = reg
+    productos: Dict[str, Dict[str, Any]] = {}
+    for fila in filas:
+        reg = _registro_producto(fila, tallas_por_sku, stock_tienda_map)
+        productos[reg["id_ps"]] = reg
+        productos[reg["id_limpio"]] = reg
     return productos
 
 
+def cargar_catalogo_sqlite() -> Dict[str, Dict[str, Any]]:
+    if not RUTA_BD.exists():
+        return {}
+
+    conn = sqlite3.connect(RUTA_BD, timeout=30)
+    try:
+        inv.asegurar_esquema(conn)
+        tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        tiene_candidatos = "zapatos_candidatos" in tablas
+        if tiene_candidatos:
+            _purgar_filas_sin_catalogo(conn)
+        tallas_por_sku = _reunir_tallas_por_sku(conn, tablas)
+        return _leer_productos_catalogo(conn, tallas_por_sku) if tiene_candidatos else {}
+    finally:
+        conn.close()
+
+
 # ======================================================================================
-# PERFILES POR CATEGORÍA
+# PERFILES POR CATEGORIA (12 PERFILES COMERCIALES)
 # ======================================================================================
 PERFILES_CATALOGO: Dict[str, Dict[str, Any]] = {
-    "plantilla_cuidado": {
-        "tipo": "plantilla_cuidado",
-        "unidad_chip": "TALLA MX",
-        "subtitulo_03": "PRODUCTO 100% NUEVO Y ORIGINAL  ·  GARANTÍA DIRECTA",
-        "badge_izq_inf": "DISEÑO ANATÓMICO, SUAVE Y RESISTENTE",
-        "beneficios": [
-            ("PRODUCTO 100% NUEVO Y ORIGINAL", "Artículo original en su empaque de fábrica, revisado cuidadosamente antes de enviarse."),
-            ("EMPAQUE DE ALTA PROTECCIÓN", "Protegido cuidadosamente con material de alta resistencia para un traslado impecable."),
-            ("CONFORT Y AMORTIGUACIÓN DIARIA", "Diseño anatómico que absorbe el impacto al caminar, brindando descanso y frescura en cada paso."),
-            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa de inmediato, seguro y respaldado por la plataforma."),
-        ],
-        "titulo_04": "GUÍA DE TALLAS Y AJUSTE · PLANTILLAS Y ACCESORIOS",
-        "subtitulo_04": "TABLA DE EQUIVALENCIAS EN CENTÍMETROS (MX)  ·  FORMATO AJUSTABLE",
-        "columnas_04": ("TALLA / FORMATO", "RANGO CALZADO MX", "LARGO EN (CM)"),
-        "filas_izq": [
-            ("INFANTIL / JR", "15.0 al 21.5 MX", "15.0 a 21.5 cm"),
-            ("TALLA CH (S)", "22.0 al 24.5 MX", "22.0 a 24.5 cm"),
-            ("TALLA M (MED)", "25.0 al 27.0 MX", "25.0 a 27.0 cm"),
-            ("TALLA G (L)", "27.5 al 30.0 MX", "27.5 a 30.0 cm"),
-        ],
-        "filas_der": [
-            ("DAMA ESTÁNDAR", "22.0 al 26.0 MX", "Recortable 22-26 cm"),
-            ("CABALLERO EST.", "25.0 al 29.5 MX", "Recortable 25-29.5 cm"),
-            ("TALONERA / GEL", "Ajuste Universal", "Anatómico Estándar"),
-            ("UNITALLA (UNI)", "22.0 al 29.0 MX", "Guía de Corte Impresa"),
-        ],
-        "tallas_default": ["CH", "M", "G"],
-        "pasos_04": [
-            ("REVISA TU TALLA MX", "Verifica el número mexicano (CM) del calzado donde colocarás tu plantilla o accesorio."),
-            ("AJUSTE RECORTABLE", "Si tu plantilla incluye líneas guía, recorta la punta con tijeras siguiendo tu talla exacta."),
-            ("COLOCACIÓN LIMPIA", "Retira la plantilla anterior o limpia el interior del calzado antes de insertar la nueva."),
-        ],
-    },
     "perfumeria": {
         "tipo": "perfumeria",
         "unidad_chip": "PRESENTACIÓN",
@@ -878,20 +853,8 @@ PERFILES_CATALOGO: Dict[str, Dict[str, Any]] = {
 
 
 # ======================================================================================
-# CLASIFICADOR DE CATEGORÍAS
+# CLASIFICADOR DE CATEGORIAS
 # ======================================================================================
-# Artículos de cuidado que SIEMPRE son plantilla/accesorio de calzado.
-RE_PLANTILLA_CUIDADO = re.compile(
-    r"\b(plantilla|plantillas|talonera|taloneras|calzador|calzadores|boleador|"
-    r"cera\s+para|esponja\s+lustradora|protector\s+de\s+tal[oó]n|gel\s+ortop[eé]dico|"
-    r"horm(?:a|as)\s+(?:para|de)\s+(?:zapato|zapatos|calzado|bota|botas|tenis))\b",
-    re.I,
-)
-# Palabras ambiguas ("tenis con cordones", "sudadera con cordón", "bota con agujetas"):
-# solo indican cuidado de calzado si el título NO menciona calzado ni prendas.
-RE_CUIDADO_AMBIGUO = re.compile(
-    r"\b(agujeta|agujetas|cord[oó]n|cordones|almohadilla|almohadillas)\b", re.I
-)
 RE_CALZADO = re.compile(
     r"\b(zapato|zapatos|tenis|mocas[ií]n|mocasines|choclo|choclos|top\s*sider|bot[ií]n|botines|bota|botas|"
     r"sandalia|sandalias|zapatilla|zapatillas|loafer|hiker|calzado|chancla|chanclas|huarache|huaraches|"
@@ -900,8 +863,7 @@ RE_CALZADO = re.compile(
 )
 RE_NO_CALZADO = re.compile(
     r"\b(pantal[oó]n|pantalones|jeans|mezclilla|calcet[ií]n|calcetines|calceta|calcetas|tines?|medias|"
-    r"mochila|bolsa|gorra|playera|camisa|chamarra|sudadera|short|shorts|legging|leggings|perfume|"
-    r"plantilla|plantillas|talonera|agujeta|agujetas|calzador)\b",
+    r"mochila|bolsa|gorra|playera|camisa|chamarra|sudadera|short|shorts|legging|leggings|perfume)\b",
     re.I,
 )
 RE_INFANTIL_CALZADO = re.compile(
@@ -910,15 +872,52 @@ RE_INFANTIL_CALZADO = re.compile(
     r"toy\s*story|hello\s*kitty|minions)\b",
     re.I,
 )
-# Un calzado es infantil por TALLAS solo si TODAS las tallas en stock son menores a esto
-# (la 22.0 ya es talla de dama: un zapato adulto con solo la 22 en stock no es infantil).
-LIMITE_TALLA_INFANTIL = 22.0
+RE_INFANTIL_GENERICO = re.compile(
+    r"\b(escolar|ni[ñn][oa]s?|infantil|beb[eé]|junior|jr|kids|bluey|spiderman|paw\s*patrol|kuromi|sonic|mickey|minnie|"
+    r"stitch|avengers|disney|luces|colegial|k\s*pop|woody)\b"
+)
+
+REGLAS_PERFIL_NO_CALZADO: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    ("perfumeria", re.compile(
+        r"\b(perfume|perfumes|fragancia|fragancias|locion|loci[oó]n|eau\s*de|colonia|body\s*mist|desodorante|cosmetico|cosm[eé]tico|maquillaje|labial|crema\s*corporal|shampoo|limpiador)\b"
+    )),
+    ("hogar_cocina", re.compile(
+        r"\b(arrocera|comal|sart[eé]n|sartenes|olla|ollas|cacerola|bater[ií]a\s*de\s*cocina|licuadora|cafetera|termo|vajilla|utensilio|cobertor|edred[oó]n|s[aá]bana|sabanas|frazada|almohada|coj[ií]n|toalla|mantel|cortina|tapete|hogar)\b"
+    )),
+    ("accesorios", re.compile(
+        r"\b(gorra|gorras|gorro|sombrero|visera|snapback|mochila|mochilas|bolsa|bolsas|bolso|cartera|cangurera|mariconera|maleta|lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes)\b"
+    )),
+    ("calcetin", re.compile(
+        r"\b(calcet[ií]n|calcetines|calceta|calcetas|tin|tines|medias|tobimedias?|media(?!\s+(?:manga|ca[ñn]a|suela|tac[oó]n)))\b"
+    )),
+    ("calzones", re.compile(
+        r"\b(calz[oó]n|calzones|boxer|b[oó]xer|boxers|b[oó]xers|trusa|trusas|bikini|bikinis|tanga|tangas|cachetero|cacheteros|hipkini|panty|panti|pantis|pantys|faja|fajas|control\s*abdomen|body\s*control|ropa\s*interior|lencer[ií]a|brasier|bra|bralette|top\s*interior|corpi[ñn]o|camiseta\s*interior)\b"
+    )),
+    ("chamarra_abrigador", re.compile(
+        r"\b(chamarra|chamarras|chaleco|chalecos|abrigo|abrigos|capa|capas|poncho|gabardina|rompevientos|parka|bomber|torera|saco|blazer|cardigan|c[aá]rdigan|su[eé]ter|sueteres|sudadera|sudaderas|hoodie|polar|abrigador)\b"
+    )),
+    ("camisa", re.compile(r"\b(camisa|camisas|guayabera|guayaberas|sobrecamisa)\b")),
+    ("blusa", re.compile(
+        r"\b(blusa|blusas|blus[oó]n|camisera\s*dama|crop\s*top|top\s*seamless|top\s*deportivo|top\s*dama|vestido|vestidos|enterizo|jumpsuit|palazzo)\b"
+    )),
+    ("playera", re.compile(
+        r"\b(playera|playeras|polo|t-shirt|jersey|pijama|pijamas|lounge|camis[oó]n|camiseta|camisetas|tank\s*top|esqueleto|bata|conjunto)\b"
+    )),
+    ("pantalon", re.compile(
+        r"\b(pantal[oó]n|pantalones|jeans|mezclilla|skinny|superskinny|short|shorts|bermuda|bermudas|falda|faldas|legging|leggings|mall[oó]n|jogger|joggers|pants|capri)\b"
+    )),
+)
+
+
+def _perfil_calzado(texto: str, tallas_num: List[float], patron_infantil: "re.Pattern[str]") -> Dict[str, Any]:
+    es_infantil = bool(patron_infantil.search(texto)) or bool(tallas_num and max(tallas_num) <= 22.0)
+    return PERFILES_CATALOGO["calzado_infantil"] if es_infantil else PERFILES_CATALOGO["calzado_adulto"]
 
 
 def detectar_perfil_prenda(
     nombre: str, marca: str, corte: str, tallas_bd: List[str], origen_catalogo: str = ""
 ) -> Dict[str, Any]:
-    texto_nombre = (nombre or "").lower().strip()
+    texto_nombre = nombre.lower()
     texto = f"{nombre} {marca} {corte} {origen_catalogo}".lower()
     tallas_num = [
         float(m.group(1))
@@ -926,114 +925,28 @@ def detectar_perfil_prenda(
         if (m := re.match(r"^(\d+(?:\.\d+)?)$", str(t).strip())) and 10.0 <= float(m.group(1)) <= 33.0
     ]
 
-    # 0. Plantillas, taloneras y cuidado del calzado (prioridad sobre catálogos de calzado)
-    if RE_PLANTILLA_CUIDADO.search(texto_nombre):
-        return PERFILES_CATALOGO["plantilla_cuidado"]
-    if (
-        RE_CUIDADO_AMBIGUO.search(texto_nombre)
-        and not RE_CALZADO.search(texto_nombre)
-        and not RE_NO_CALZADO.search(texto_nombre)
-    ):
-        return PERFILES_CATALOGO["plantilla_cuidado"]
-
-    es_infantil = bool(RE_INFANTIL_CALZADO.search(texto)) or bool(tallas_num and max(tallas_num) < LIMITE_TALLA_INFANTIL)
-
-    # 1. Calzado explícito en el título (y que no sea prenda/accesorio/plantilla)
     if RE_CALZADO.search(texto_nombre) and not RE_NO_CALZADO.search(texto_nombre):
-        return PERFILES_CATALOGO["calzado_infantil"] if es_infantil else PERFILES_CATALOGO["calzado_adulto"]
+        return _perfil_calzado(texto, tallas_num, RE_INFANTIL_CALZADO)
 
-    # 2. Perfumería
-    if re.search(
-        r"\b(perfume|perfumes|fragancia|fragancias|locion|loci[oó]n|eau\s*de|colonia|body\s*mist|desodorante|cosmetico|cosm[eé]tico|maquillaje|labial|crema\s*corporal|shampoo|limpiador)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["perfumeria"]
+    for clave_perfil, patron in REGLAS_PERFIL_NO_CALZADO:
+        if patron.search(texto):
+            return PERFILES_CATALOGO[clave_perfil]
 
-    # 3. Hogar y cocina
-    if re.search(
-        r"\b(arrocera|comal|sart[eé]n|sartenes|olla|ollas|cacerola|bater[ií]a\s*de\s*cocina|licuadora|cafetera|termo|vajilla|utensilio|cobertor|edred[oó]n|s[aá]bana|sabanas|frazada|almohada|coj[ií]n|toalla|mantel|cortina|tapete|hogar)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["hogar_cocina"]
-
-    # 4. Gorras, bolsas y accesorios
-    if re.search(
-        r"\b(gorra|gorras|gorro|sombrero|visera|snapback|mochila|mochilas|bolsa|bolsas|bolso|cartera|cangurera|mariconera|maleta|lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["accesorios"]
-
-    # 5. Calcetería
-    if re.search(
-        r"\b(calcet[ií]n|calcetines|calceta|calcetas|tin|tines|medias|tobimedias?|media(?!\s+(?:manga|ca[ñn]a|suela|tac[oó]n)))\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["calcetin"]
-
-    # 6. Ropa interior
-    if re.search(
-        r"\b(calz[oó]n|calzones|boxer|b[oó]xer|boxers|b[oó]xers|trusa|trusas|bikini|bikinis|tanga|tangas|cachetero|cacheteros|hipkini|panty|panti|pantis|pantys|faja|fajas|control\s*abdomen|body\s*control|ropa\s*interior|lencer[ií]a|brasier|bra|bralette|top\s*interior|corpi[ñn]o|camiseta\s*interior)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["calzones"]
-
-    # 7. Chamarras y abrigadores
-    if re.search(
-        r"\b(chamarra|chamarras|chaleco|chalecos|abrigo|abrigos|capa|capas|poncho|gabardina|rompevientos|parka|bomber|torera|saco|blazer|cardigan|c[aá]rdigan|su[eé]ter|sueteres|sudadera|sudaderas|hoodie|polar|abrigador)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["chamarra_abrigador"]
-
-    # 8. Camisas
-    if re.search(r"\b(camisa|camisas|guayabera|guayaberas|sobrecamisa)\b", texto):
-        return PERFILES_CATALOGO["camisa"]
-
-    # 9. Blusas y vestidos
-    if re.search(
-        r"\b(blusa|blusas|blus[oó]n|camisera\s*dama|crop\s*top|top\s*seamless|top\s*deportivo|top\s*dama|vestido|vestidos|enterizo|jumpsuit|palazzo)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["blusa"]
-
-    # 10. Playeras, polos y pijamas
-    if re.search(
-        r"\b(playera|playeras|polo|t-shirt|jersey|pijama|pijamas|lounge|camis[oó]n|camiseta|camisetas|tank\s*top|esqueleto|bata|conjunto)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["playera"]
-
-    # 11. Pantalones y similares
-    if re.search(
-        r"\b(pantal[oó]n|pantalones|jeans|mezclilla|skinny|superskinny|short|shorts|bermuda|bermudas|falda|faldas|legging|leggings|mall[oó]n|jogger|joggers|pants|capri)\b",
-        texto,
-    ):
-        return PERFILES_CATALOGO["pantalon"]
-
-    # 12. Calzado infantil o adulto por defecto
-    return PERFILES_CATALOGO["calzado_infantil"] if es_infantil else PERFILES_CATALOGO["calzado_adulto"]
+    return _perfil_calzado(texto, tallas_num, RE_INFANTIL_GENERICO)
 
 
 # ======================================================================================
-# DESCARGA DE FOTOS
+# DESCARGA DE FOTOS Y EXTRACCION RAPIDA DE PRECIOS
 # ======================================================================================
-ERRORES_IMAGEN = (OSError, ValueError, Image.DecompressionBombError)
-
-
 def http_get_bytes(url: str, timeout: int = 14, con_texto: bool = True) -> Tuple[int, bytes, str]:
-    """GET con huella TLS de navegador (si hay curl_cffi) y respaldo con urllib.
-
-    Un 404/410 es definitivo: no se reintenta con otros navegadores ni con urllib.
-    """
     if tls_requests is not None:
         for nav in ("chrome120", "chrome110", "safari15_5"):
             try:
-                r = tls_requests.get(url, impersonate=nav, timeout=timeout)
-            except Exception:  # curl_cffi lanza varios tipos de error de red
+                r = tls_requests.get(url, impersonate=nav, timeout=timeout, allow_redirects=True)
+                if r.status_code == 200:
+                    return r.status_code, r.content, (r.text if con_texto else "")
+            except Exception:
                 continue
-            if r.status_code == 200:
-                return r.status_code, r.content, (r.text if con_texto else "")
-            if r.status_code in (404, 410):
-                return r.status_code, b"", ""
     try:
         req = urllib.request.Request(
             url,
@@ -1045,7 +958,7 @@ def http_get_bytes(url: str, timeout: int = 14, con_texto: bool = True) -> Tuple
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             return getattr(resp, "status", 200), raw, (raw.decode("utf-8", errors="ignore") if con_texto else "")
-    except Exception:  # urllib: HTTPError, URLError, timeout, SSL…
+    except Exception:
         return 0, b"", ""
 
 
@@ -1055,14 +968,13 @@ def generar_variantes_cdn_segunda_foto(url_primera: str, id_limpio: str) -> List
         return variantes
     base, sep, query = url_primera.partition("?")
     suf_q = f"{sep}{query}" if sep else ""
-    id_re = re.escape(id_limpio)
     reemplazos = [
-        (rf"({id_re})([_\-])1(\.[a-zA-Z]+)$", r"\1\g<2>2\3"),
-        (rf"({id_re})([_\-])1(\.[a-zA-Z]+)$", r"\1\g<2>3\3"),
-        (rf"({id_re})([_\-])01(\.[a-zA-Z]+)$", r"\1\g<2>02\3"),
-        (rf"({id_re})([_\-]?)[aA](\.[a-zA-Z]+)$", r"\1\g<2>b\3"),
-        (rf"({id_re})(\.[a-zA-Z]+)$", r"\1_2\2"),
-        (rf"({id_re})(\.[a-zA-Z]+)$", r"\1-2\2"),
+        (rf"({id_limpio})([_\-])1(\.[a-zA-Z]+)$", r"\1\g<2>2\3"),
+        (rf"({id_limpio})([_\-])1(\.[a-zA-Z]+)$", r"\1\g<2>3\3"),
+        (rf"({id_limpio})([_\-])01(\.[a-zA-Z]+)$", r"\1\g<2>02\3"),
+        (rf"({id_limpio})([_\-]?)[aA](\.[a-zA-Z]+)$", r"\1\g<2>b\3"),
+        (rf"({id_limpio})(\.[a-zA-Z]+)$", r"\1_2\2"),
+        (rf"({id_limpio})(\.[a-zA-Z]+)$", r"\1-2\2"),
         (r"([_\-])1(\.[a-zA-Z]+)$", r"\g<1>2\2"),
         (r"([_\-])01(\.[a-zA-Z]+)$", r"\g<1>02\2"),
     ]
@@ -1075,7 +987,6 @@ def generar_variantes_cdn_segunda_foto(url_primera: str, id_limpio: str) -> List
 
 def extraer_urls_galeria_html(html: str, id_limpio: str) -> List[str]:
     candidatas: List[str] = []
-    id_re = re.escape(id_limpio)
 
     def agregar(u: str) -> None:
         ul = u.strip().replace("\\/", "/").replace("\\u002F", "/").replace("&amp;", "&")
@@ -1084,7 +995,7 @@ def extraer_urls_galeria_html(html: str, id_limpio: str) -> List[str]:
         low = ul.lower()
         if any(b in low for b in ("logo", "icon", "avatar", "banner", "placeholder", ".svg", "favicon", "spinner", "thumb_")):
             return
-        if re.search(r"(?<!\d)(?:50|100)x(?:\d|\b)", low):  # miniaturas reales, no 750x750 / 1100x1100
+        if re.search(r"(?<!\d)(?:50|100)x(?:\d|\b)", low):
             return
         if ul not in candidatas:
             candidatas.append(ul)
@@ -1103,7 +1014,7 @@ def extraer_urls_galeria_html(html: str, id_limpio: str) -> List[str]:
             agregar(m_c.group(1))
 
     for m_id in re.findall(
-        rf'https?:\\?/\\?/[^"\'\s<>]*?{id_re}[^"\'\s<>]*?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s<>]*)?', html, re.I
+        rf'https?:\\?/\\?/[^"\'\s<>]*?{id_limpio}[^"\'\s<>]*?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s<>]*)?', html, re.I
     ):
         agregar(m_id)
 
@@ -1128,20 +1039,30 @@ def _bajar_imagen(url: str) -> Optional[Image.Image]:
         return None
     try:
         return Image.open(BytesIO(raw)).convert("RGB")
-    except ERRORES_IMAGEN:
+    except Exception:
         return None
 
 
-def descargar_fotos_oficiales_ps(
-    id_limpio: str, url_real: str, img_01_existente: Optional[Image.Image] = None
-) -> List[Image.Image]:
-    """Devuelve hasta 2 fotos (la 1.ª es `img_01_existente` si se dio). Pausa aleatoria anti-bloqueo."""
+def descargar_fotos_y_ficha_ps(
+    id_limpio: str, url_real: str, img_01_existente: Optional[Image.Image] = None, descargar_imagenes: bool = True
+) -> Tuple[List[Image.Image], Dict[str, Any], str]:
+    """
+    En una sola visita HTTP obtiene:
+      - Las 2 imágenes oficiales de Price Shoes (si `descargar_imagenes=True`).
+      - La ficha de `__NEXT_DATA__` (costo_socio, precio_publico, nombre, marca, categoría).
+      - La URL real de la ficha `/productos/...`.
+    """
     imagenes: List[Image.Image] = [img_01_existente] if img_01_existente is not None else []
-    urls_vistas: set[str] = set()
+    ficha: Dict[str, Any] = {}
+    urls_vistas: Set[str] = set()
     url_ficha = url_real.strip()
-    id_re = re.escape(id_limpio)
 
     def procesar_html(html: str) -> bool:
+        nonlocal ficha
+        if not ficha:
+            ficha = inv.extraer_ficha_next_data(html)
+        if not descargar_imagenes:
+            return bool(ficha)
         for u_img in extraer_urls_galeria_html(html, id_limpio):
             if u_img in urls_vistas:
                 continue
@@ -1154,45 +1075,36 @@ def descargar_fotos_oficiales_ps(
         return False
 
     try:
-        time.sleep(random.uniform(1.8, 3.2))
         if not url_ficha or "/productos/" not in url_ficha:
             st_b, _, html_b = http_get_bytes(f"https://www.priceshoes.com/buscar?q={id_limpio}", timeout=15)
             if st_b == 200 and html_b:
-                m_prod = re.search(rf'https://www\.priceshoes\.com/productos/[a-zA-Z0-9\-]*{id_re}[a-zA-Z0-9\-]*', html_b)
-                m_rel = re.search(rf'href=["\'](/productos/[a-zA-Z0-9\-]*{id_re}[a-zA-Z0-9\-]*)["\']', html_b)
+                m_prod = re.search(
+                    rf'https://www\.priceshoes\.com/productos/[a-zA-Z0-9\-]*{re.escape(id_limpio)}[a-zA-Z0-9\-]*',
+                    html_b,
+                )
+                m_rel = re.search(
+                    rf'href=["\'](/productos/[a-zA-Z0-9\-]*{re.escape(id_limpio)}[a-zA-Z0-9\-]*)["\']',
+                    html_b,
+                )
                 if m_prod:
                     url_ficha = m_prod.group(0)
                 elif m_rel:
                     url_ficha = f"https://www.priceshoes.com{m_rel.group(1)}"
                 elif procesar_html(html_b):
-                    return imagenes
+                    return imagenes, ficha, url_ficha
 
         if url_ficha:
             st_p, _, html_p = http_get_bytes(url_ficha, timeout=15)
             if st_p == 200 and html_p:
                 procesar_html(html_p)
-    except Exception as e:  # una ficha rota no debe detener todo el lote
-        print(f"   ⚠️ Descarga fallida para {id_limpio}: {e}")
-    return imagenes
+    except Exception:
+        pass
+    return imagenes, ficha, url_ficha
 
 
 # ======================================================================================
-# LÁMINAS
+# LAMINAS HD (1200 x 1200 PX)
 # ======================================================================================
-def tallas_para_mostrar(perfil: Dict[str, Any], tallas_disponibles: List[str]) -> List[str]:
-    """Tallas a imprimir en la lámina 03.
-
-    - Con datos reales de stock: esas tallas.
-    - Sin datos: solo las presentaciones fijas (perfumería, hogar, accesorios).
-      Para calzado/ropa NO se inventan tallas: se devuelve [] (la lámina muestra un aviso).
-    """
-    if tallas_disponibles:
-        return list(tallas_disponibles)
-    if perfil["tipo"] in TIPOS_CON_PRESENTACION_FIJA:
-        return list(perfil["tallas_default"])
-    return []
-
-
 def crear_lamina_01_portada_blanca(img_recortada: Image.Image) -> Image.Image:
     lienzo = Image.new("RGB", (1200, 1200), (255, 255, 255))
     mejorada = ImageEnhance.Sharpness(img_recortada).enhance(1.18)
@@ -1224,19 +1136,15 @@ def renderizar_lamina_03_ficha_beneficios(
     f_chip_s = cargar_fuente(14, True)
     f_info_ancho = 1000
 
-    # Encabezado (los textos largos se acortan con "..." para no invadir la insignia)
     draw.rounded_rectangle([30, 25, 1170, 155], radius=20, fill=(15, 23, 42))
     draw.rounded_rectangle([35, 147, 1165, 155], radius=4, fill=(245, 158, 11))
     titulo = limpiar_titulo(nombre).upper()
-    f_tit = ajustar_fuente(draw, titulo, 770, 34, 20, True)
-    draw.text((60, 44), recortar_con_puntos(draw, titulo, f_tit, 770), fill=(255, 255, 255), font=f_tit)
+    draw.text((60, 44), titulo, fill=(255, 255, 255), font=ajustar_fuente(draw, titulo, 770, 34, 20, True))
     sub = perfil["subtitulo_03"]
-    f_sub = ajustar_fuente(draw, sub, 770, 19, 12, True)
-    draw.text((60, 96), recortar_con_puntos(draw, sub, f_sub, 770), fill=(148, 163, 184), font=f_sub)
+    draw.text((60, 96), sub, fill=(148, 163, 184), font=ajustar_fuente(draw, sub, 770, 19, 12, True))
     draw.rounded_rectangle([855, 55, 1140, 115], radius=28, fill=(245, 158, 11))
     texto_centrado(draw, 855, 1140, 74, "CALIDAD GARANTIZADA", f_pill, (15, 23, 42))
 
-    # Panel izquierdo
     draw.rounded_rectangle([30, 180, 540, 765], radius=22, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
     draw.rounded_rectangle([75, 205, 495, 255], radius=24, fill=(220, 252, 231), outline=(134, 239, 172), width=2)
     texto_centrado(draw, 75, 495, 219, "ENVÍO SEGURO DESDE CDMX", f_pill, (21, 128, 61))
@@ -1249,7 +1157,6 @@ def renderizar_lamina_03_ficha_beneficios(
     draw.rounded_rectangle([55, 690, 515, 742], radius=24, fill=(219, 234, 254), outline=(147, 197, 253), width=2)
     texto_centrado(draw, 55, 515, 705, badge, ajustar_fuente(draw, badge, 420, 18, 12, True), (29, 78, 216))
 
-    # Beneficios
     y_card = 180
     for tit_b, desc_b in perfil["beneficios"]:
         draw.rounded_rectangle([565, y_card, 1170, y_card + 132], radius=18, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
@@ -1262,40 +1169,26 @@ def renderizar_lamina_03_ficha_beneficios(
             draw.text((670, y_card + 52 + i * (tam + 6)), lin, fill=(71, 85, 105), font=f_d)
         y_card += 148
 
-    # Tallas: SOLO reales (o presentación fija); nunca se inventa disponibilidad
-    tallas_mostrar = tallas_para_mostrar(perfil, tallas_disponibles)
     draw.rounded_rectangle([30, 790, 1170, 1175], radius=22, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
     draw.rounded_rectangle([30, 790, 1170, 852], radius=18, fill=(15, 23, 42))
     draw.rectangle([30, 830, 1170, 852], fill=(15, 23, 42))
-    titulo_panel = "TALLAS NACIONALES (MX) DISPONIBLES EN STOCK" if tallas_mostrar else "TALLAS Y DISPONIBILIDAD"
-    texto_centrado(draw, 30, 1170, 808, titulo_panel, cargar_fuente(22, True), (255, 255, 255))
+    texto_centrado(draw, 30, 1170, 808, "TALLAS NACIONALES (MX) DISPONIBLES EN STOCK", cargar_fuente(22, True), (255, 255, 255))
 
-    if tallas_mostrar:
-        extra = max(0, len(tallas_mostrar) - MAX_CHIPS_03)
-        tallas_mostrar = tallas_mostrar[:MAX_CHIPS_03]
-        n = len(tallas_mostrar)
-        ancho_chip = min(145, max(84, (1040 - (n - 1) * 16) // max(n, 1)))
-        x_chip = (1200 - (n * ancho_chip + (n - 1) * 16)) // 2
-        y_chip = 882
-        for t_val in tallas_mostrar:
-            t_clean = normalizar_etiqueta_talla(t_val)
-            unidad_chip = obtener_unidad_chip(t_clean, perfil["unidad_chip"])
-            draw.rounded_rectangle([x_chip + 2, y_chip + 4, x_chip + ancho_chip + 2, y_chip + 184], radius=16, fill=(191, 219, 254))
-            draw.rounded_rectangle([x_chip, y_chip, x_chip + ancho_chip, y_chip + 180], radius=16, fill=(37, 99, 235), outline=(29, 78, 216), width=2)
-            f_num = ajustar_fuente(draw, t_clean, ancho_chip - 20, 28, 12, True)
-            texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 28, t_clean, f_num, (255, 255, 255))
-            texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 84, unidad_chip, f_chip_s, (191, 219, 254))
-            draw.line([x_chip + 14, y_chip + 118, x_chip + ancho_chip - 14, y_chip + 118], fill=(96, 165, 250), width=1)
-            f_disp = ajustar_fuente(draw, "DISPONIBLE", ancho_chip - 14, 14, 9, True)  # no se sale del chip angosto
-            texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 134, "DISPONIBLE", f_disp, (255, 255, 255))
-            x_chip += ancho_chip + 16
-        if extra:
-            texto_centrado(draw, 30, 1170, 1070, f"+ {extra} tallas más disponibles", cargar_fuente(15, True), (71, 85, 105))
-    else:
-        aviso = "Consulta las tallas disponibles de este modelo en la sección de preguntas."
-        draw.rounded_rectangle([60, 890, 1140, 1060], radius=16, fill=(239, 246, 255), outline=(191, 219, 254), width=2)
-        f_aviso = ajustar_fuente(draw, aviso, 980, 28, 16, True)
-        texto_centrado(draw, 60, 1140, 960, aviso, f_aviso, (30, 64, 175))
+    tallas_mostrar = tallas_disponibles[:8] if tallas_disponibles else perfil["tallas_default"]
+    n = len(tallas_mostrar)
+    ancho_chip = min(145, max(98, (1040 - (n - 1) * 16) // max(n, 1)))
+    x_chip = (1200 - (n * ancho_chip + (n - 1) * 16)) // 2
+    y_chip = 882
+    for t_val in tallas_mostrar:
+        t_clean = normalizar_etiqueta_talla(t_val)
+        draw.rounded_rectangle([x_chip + 2, y_chip + 4, x_chip + ancho_chip + 2, y_chip + 184], radius=16, fill=(191, 219, 254))
+        draw.rounded_rectangle([x_chip, y_chip, x_chip + ancho_chip, y_chip + 180], radius=16, fill=(37, 99, 235), outline=(29, 78, 216), width=2)
+        f_num = ajustar_fuente(draw, t_clean, ancho_chip - 20, 28, 12, True)
+        texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 28, t_clean, f_num, (255, 255, 255))
+        texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 84, perfil["unidad_chip"], f_chip_s, (191, 219, 254))
+        draw.line([x_chip + 14, y_chip + 118, x_chip + ancho_chip - 14, y_chip + 118], fill=(96, 165, 250), width=1)
+        texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 134, "DISPONIBLE", f_chip_s, (255, 255, 255))
+        x_chip += ancho_chip + 16
 
     info = "¿Dudas con tu elección? Recibe asesoría sin compromiso en la sección de preguntas antes de comprar."
     draw.rounded_rectangle([60, 1095, 1140, 1152], radius=16, fill=(239, 246, 255), outline=(191, 219, 254), width=1)
@@ -1316,13 +1209,9 @@ def renderizar_lamina_04_guia_tallas_cm(perfil: Dict[str, Any], tallas_disponibl
     texto_centrado(draw, 30, 1170, 42, t4, ajustar_fuente(draw, t4, 1080, 32, 18, True), (255, 255, 255))
     texto_centrado(draw, 30, 1170, 94, s4, ajustar_fuente(draw, s4, 1080, 19, 12, True), (148, 163, 184))
 
-    # Se resaltan solo las tallas realmente disponibles (sin inventar por defecto)
-    base_activas = tallas_disponibles or (
-        perfil["tallas_default"][:3] if perfil["tipo"] in TIPOS_CON_PRESENTACION_FIJA else []
-    )
-    set_activas = {normalizar_etiqueta_talla(t) for t in base_activas}
+    set_activas = {normalizar_etiqueta_talla(t) for t in (tallas_disponibles or perfil["tallas_default"][:3])}
     cabeceras = perfil["columnas_04"]
-    cols = ((28, 160), (195, 180), (385, 160))  # (desplazamiento x, ancho máx.)
+    cols = ((28, 160), (195, 180), (385, 160))
 
     for x0, x1, filas in ((30, 585, perfil["filas_izq"]), (615, 1170, perfil["filas_der"])):
         draw.rounded_rectangle([x0, 172, x1, 830], radius=18, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
@@ -1335,8 +1224,7 @@ def renderizar_lamina_04_guia_tallas_cm(perfil: Dict[str, Any], tallas_disponibl
         y_f = 240
         for idx_f, (v1, v2, v3) in enumerate(filas):
             y_t = y_f + (alto_f - 28) // 2
-            clave_fila = normalizar_etiqueta_talla(v1.split("(")[0].replace("TALLA", "").strip())
-            if clave_fila in set_activas:
+            if normalizar_etiqueta_talla(v1.split("(")[0]) in set_activas:
                 draw.rounded_rectangle([x0 + 10, y_f, x1 - 10, y_f + alto_f - 6], radius=10, fill=(220, 252, 231), outline=(134, 239, 172), width=2)
                 draw.ellipse([x0 + 20, y_f + alto_f // 2 - 9, x0 + 34, y_f + alto_f // 2 + 5], fill=(22, 163, 74))
                 celdas = (
@@ -1378,275 +1266,428 @@ def renderizar_lamina_04_guia_tallas_cm(perfil: Dict[str, Any], tallas_disponibl
 
 
 # ======================================================================================
-# DIRECTORIOS, IMÁGENES LOCALES Y FLUJO PRINCIPAL
+# DIRECTORIOS, IMAGENES LOCALES Y FLUJO PARALELO PARA "EMPEZAR AQUI" (VERDES)
 # ======================================================================================
-def descartar_carpeta(carpeta: Path) -> None:
-    """Quita una carpeta fuera de catálogo: la mueve a DIR_DESCARTADOS (o la borra si se configuró)."""
-    if ELIMINAR_DESCARTADAS:
-        shutil.rmtree(carpeta, ignore_errors=True)
+def _id_de_carpeta(nombre_carpeta: str) -> str:
+    m = re.search(r"(\d{5,8})", nombre_carpeta)
+    return m.group(1) if m else ""
+
+
+def _es_carpeta_de_catalogo(nombre_carpeta: str, datos_bd: Dict[str, Dict[str, Any]]) -> bool:
+    cid = _id_de_carpeta(nombre_carpeta)
+    return bool(cid) and (cid in datos_bd or (cid.lstrip("0") or cid) in datos_bd)
+
+
+def _fusionar_carpeta_ps(d: Path) -> None:
+    id_puro = d.name[3:].strip()
+    if not id_puro:
         return
-    DIR_DESCARTADOS.mkdir(parents=True, exist_ok=True)
-    destino = DIR_DESCARTADOS / carpeta.name
-    if destino.exists():
-        shutil.rmtree(destino, ignore_errors=True)
+    dest = DIR_CATALOGO_LISTO / id_puro
+    dest.mkdir(parents=True, exist_ok=True)
+    for arch in d.iterdir():
+        if not arch.is_file():
+            continue
+        dest_arch = dest / arch.name
+        if not dest_arch.exists():
+            shutil.move(str(arch), str(dest_arch))
+        else:
+            arch.unlink()
     try:
-        shutil.move(str(carpeta), str(destino))
-    except OSError as e:
-        print(f"⚠️ No se pudo mover {carpeta.name} a descartados: {e}")
+        d.rmdir()
+    except Exception:
+        pass
 
 
-def intento_web_reciente(carpeta: Path) -> bool:
-    """True si ya se buscó en la web para esta carpeta hace menos de REINTENTO_DIAS días."""
-    marca = carpeta / MARCA_INTENTO_WEB
+def _borrar_carpeta_si_vacia(d: Path) -> None:
+    if any(d.iterdir()):
+        return
     try:
-        return marca.exists() and (time.time() - marca.stat().st_mtime) < REINTENTO_DIAS * 86400
-    except OSError:
-        return False
-
-
-def marcar_intento_web(carpeta: Path) -> None:
-    try:
-        (carpeta / MARCA_INTENTO_WEB).touch()
-    except OSError:
+        d.rmdir()
+    except Exception:
         pass
 
 
 def normalizar_y_depurar_directorios(datos_bd: Dict[str, Dict[str, Any]]) -> int:
-    """
-    1. Fusiona carpetas `PS-1342498` a `1342498`.
-    2. Aparta (mueve a `DIR_DESCARTADOS`, o borra si ELIMINAR_DESCARTADAS) cualquier carpeta
-       de `data/catalogo_listo` que NO pertenezca a los catálogos PDF oficiales de `datos_bd`.
-
-    Protección: si `datos_bd` viene vacío (BD ausente, sin columna origen_catalogo o sin filas)
-    NO se aparta nada, para no vaciar el catálogo por un error de lectura.
-    """
     if not DIR_CATALOGO_LISTO.exists():
         return 0
 
     for d in list(DIR_CATALOGO_LISTO.iterdir()):
         if d.is_dir() and d.name.upper().startswith("PS-"):
-            id_puro = d.name[3:].strip()
-            if id_puro:
-                dest = DIR_CATALOGO_LISTO / id_puro
-                dest.mkdir(parents=True, exist_ok=True)
-                for arch in d.iterdir():
-                    if arch.is_file():
-                        dest_arch = dest / arch.name
-                        if not dest_arch.exists():
-                            shutil.move(str(arch), str(dest_arch))
-                        else:
-                            arch.unlink()
-                try:
-                    d.rmdir()
-                except OSError:
-                    pass
+            _fusionar_carpeta_ps(d)
 
     if not datos_bd:
         print("⚠️ Sin productos de catálogo PDF en la BD: se omite la depuración de carpetas.")
         return 0
 
-    apartadas = 0
+    eliminadas = 0
     for d in list(DIR_CATALOGO_LISTO.iterdir()):
         if not d.is_dir():
             continue
-        m = re.search(r"(\d{5,8})", d.name)
-        cid = m.group(1) if m else ""
-        if not cid or (cid not in datos_bd and normalizar_id(cid) not in datos_bd):
-            descartar_carpeta(d)
-            apartadas += 1
-        elif not any(d.iterdir()):
-            try:
-                d.rmdir()
-            except OSError:
-                pass
+        if _es_carpeta_de_catalogo(d.name, datos_bd):
+            _borrar_carpeta_si_vacia(d)
+        else:
+            shutil.rmtree(d, ignore_errors=True)
+            eliminadas += 1
 
-    return apartadas
+    return eliminadas
+
+
+NOMBRES_IMG_01 = ["01_original_raw.jpg", "01_portada_blanca.jpg", "01_portada.jpg", "01_portada_hd.jpg", "01.jpg"]
+NOMBRES_IMG_02 = ["02_angulo_raw.jpg", "02_angulo_galeria.jpg", "02_angulo.jpg", "02_detalle.jpg", "02_angulo_hd.jpg", "02.jpg"]
+PREFIJOS_NO_PORTADA = ("02", "03", "04", "lamina_03", "lamina_04")
+
+ARCHIVOS_A_CONSERVAR = {
+    "01_portada_blanca.jpg", "02_angulo_galeria.jpg", "03_ficha_beneficios.jpg", "04_guia_tallas_cm.jpg",
+    "01_original_raw.jpg", "02_angulo_raw.jpg", "01.jpg", "02.jpg", "03.jpg", "04.jpg",
+}
+
+
+def carpeta_tiene_4_laminas(carpeta: Path) -> bool:
+    return carpeta.exists() and all((carpeta / nombre).exists() for nombre in LAMINAS_REQUERIDAS)
+
+
+def _abrir_rgb(ruta: Path) -> Optional[Image.Image]:
+    try:
+        return Image.open(ruta).convert("RGB")
+    except Exception:
+        return None
+
+
+def _guardar_respaldo_si_falta(img: Image.Image, ruta: Path) -> None:
+    if ruta.exists():
+        return
+    try:
+        img.save(ruta, quality=95)
+    except Exception:
+        pass
+
+
+def _buscar_imagen_01(carpeta: Path) -> Optional[Image.Image]:
+    conocidas = [carpeta / n for n in NOMBRES_IMG_01 if (carpeta / n).exists()]
+    otras = [
+        arch
+        for arch in sorted(carpeta.glob("*.jpg")) + sorted(carpeta.glob("*.png"))
+        if not arch.name.lower().startswith(PREFIJOS_NO_PORTADA)
+    ]
+    for ruta in conocidas + otras:
+        img = _abrir_rgb(ruta)
+        if img is not None:
+            return img
+    return None
+
+
+def _buscar_imagen_02(carpeta: Path, img_01: Optional[Image.Image]) -> Optional[Image.Image]:
+    for n2 in NOMBRES_IMG_02:
+        if not (carpeta / n2).exists():
+            continue
+        cand2 = _abrir_rgb(carpeta / n2)
+        if cand2 is None or tiene_lupa_o_rotacion_vieja(cand2):
+            continue
+        try:
+            es_distinta = img_01 is not None and not son_imagenes_iguales(img_01, cand2, revisar_espejo=True)
+        except Exception:
+            continue
+        if es_distinta:
+            return cand2
+    return None
 
 
 def obtener_imagenes_base_locales(carpeta: Path) -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
-    candidatas_01 = ["01_original_raw.jpg", "01_portada_blanca.jpg", "01_portada.jpg", "01_portada_hd.jpg", "01.jpg"]
-    candidatas_02 = ["02_angulo_raw.jpg", "02_angulo_galeria.jpg", "02_angulo.jpg", "02_detalle.jpg", "02_angulo_hd.jpg", "02.jpg"]
-    img_01, img_02 = None, None
+    img_01 = _buscar_imagen_01(carpeta)
+    if img_01 is not None:
+        _guardar_respaldo_si_falta(img_01, carpeta / "01_original_raw.jpg")
 
-    for n1 in candidatas_01:
-        p1 = carpeta / n1
-        if p1.exists():
-            try:
-                img_01 = Image.open(p1).convert("RGB")
-                break
-            except ERRORES_IMAGEN:
-                pass
-    if img_01 is None:
-        for arch in sorted(carpeta.glob("*.jpg")) + sorted(carpeta.glob("*.png")):
-            if not arch.name.lower().startswith(("02", "03", "04", "lamina_03", "lamina_04")):
-                try:
-                    img_01 = Image.open(arch).convert("RGB")
-                    break
-                except ERRORES_IMAGEN:
-                    pass
-    if img_01 is not None and not (carpeta / "01_original_raw.jpg").exists():
-        try:
-            img_01.save(carpeta / "01_original_raw.jpg", **OPCIONES_JPEG)
-        except OSError:
-            pass
-
-    for n2 in candidatas_02:
-        p2 = carpeta / n2
-        if p2.exists():
-            try:
-                cand2 = Image.open(p2).convert("RGB")
-                if tiene_lupa_o_rotacion_vieja(cand2):
-                    continue
-                if img_01 is not None and not son_imagenes_iguales(img_01, cand2, revisar_espejo=True):
-                    img_02 = cand2
-                    if not (carpeta / "02_angulo_raw.jpg").exists():
-                        try:
-                            img_02.save(carpeta / "02_angulo_raw.jpg", **OPCIONES_JPEG)
-                        except OSError:
-                            pass
-                    break
-            except ERRORES_IMAGEN:
-                pass
+    img_02 = _buscar_imagen_02(carpeta, img_01)
+    if img_02 is not None:
+        _guardar_respaldo_si_falta(img_02, carpeta / "02_angulo_raw.jpg")
     return img_01, img_02
 
 
+def _guardar_imagen(img: Image.Image, ruta: Path) -> None:
+    try:
+        img.save(ruta, quality=95)
+    except Exception:
+        pass
+
+
+def _guardar_laminas(carpeta: Path, laminas: List[Tuple[str, Image.Image]]) -> None:
+    for base, lam in laminas:
+        destino = carpeta / f"{base}.jpg"
+        lam.save(destino, quality=95)
+        shutil.copyfile(destino, carpeta / f"{base[:2]}.jpg")
+
+    for arch in list(carpeta.glob("*.jpg")) + list(carpeta.glob("*.png")):
+        if arch.name not in ARCHIVOS_A_CONSERVAR:
+            try:
+                arch.unlink()
+            except Exception:
+                pass
+
+
+def _renderizar_carrusel(
+    carpeta: Path, meta: Dict[str, Any], img_01_raw: Image.Image, img_02_raw: Optional[Image.Image]
+) -> Tuple[Dict[str, Any], bool]:
+    img_01_rec = recortar_espacio_blanco(img_01_raw)
+    img_02_rec = (
+        recortar_espacio_blanco(img_02_raw)
+        if (img_02_raw is not None and not son_imagenes_iguales(img_01_rec, img_02_raw, revisar_espejo=False))
+        else None
+    )
+    tallas = meta.get("tallas_lista", [])
+    perfil = detectar_perfil_prenda(
+        meta["nombre"], meta["marca"], meta["corte"], tallas, meta.get("origen_catalogo", "")
+    )
+    _guardar_laminas(carpeta, [
+        ("01_portada_blanca", crear_lamina_01_portada_blanca(img_01_rec)),
+        ("02_angulo_galeria", crear_lamina_02_angulo_galeria(img_01_rec, img_02_rec)),
+        ("03_ficha_beneficios", renderizar_lamina_03_ficha_beneficios(img_01_rec, meta["nombre"], perfil, tallas)),
+        ("04_guia_tallas_cm", renderizar_lamina_04_guia_tallas_cm(perfil, tallas)),
+    ])
+    return perfil, img_02_rec is not None
+
+
+def _actualizar_ficha_en_bd(conn: sqlite3.Connection, id_ps: str, ficha: Dict[str, Any], url_final: str) -> None:
+    if not ficha:
+        return
+    nombre = str(ficha.get("nombre") or "")
+    categoria = str(ficha.get("categoria_ps") or "")
+    marca = str(ficha.get("marca") or "")
+    costo = float(ficha.get("costo_socio") or 0.0)
+    publico = float(ficha.get("precio_publico") or 0.0)
+    tipo_p = inv.clasificar_tipo_producto(nombre, categoria)
+    est_val = "ok" if (costo > 0 and publico > costo) else "sin_publico"
+
+    conn.execute(
+        """
+        UPDATE zapatos_candidatos
+        SET nombre_modelo = CASE WHEN ? != '' THEN ? ELSE nombre_modelo END,
+            costo_socio = CASE WHEN ? > 0 THEN ? ELSE costo_socio END,
+            precio_publico = CASE WHEN ? > 0 THEN ? ELSE precio_publico END,
+            categoria_ps = CASE WHEN ? != '' THEN ? ELSE categoria_ps END,
+            marca_extraida = CASE WHEN ? != '' THEN ? ELSE marca_extraida END,
+            tipo_producto = ?,
+            costo_validacion = ?,
+            url_real = CASE WHEN ? LIKE 'http%' THEN ? ELSE url_real END
+        WHERE id_ps = ?
+        """,
+        (
+            nombre, nombre, costo, costo, publico, publico,
+            categoria, categoria, marca, marca, tipo_p, est_val,
+            url_final, url_final, id_ps,
+        ),
+    )
+
+
+def extraer_precios_verdes_faltantes(datos_bd: Dict[str, Dict[str, Any]]) -> int:
+    """
+    FASE 1: Busca todos los SKUs de los Cuadrantes Verdes ('Empezar aquí') que aún
+    no tengan `costo_socio` > 0 y extrae su precio y ficha en paralelo (10 hilos).
+    """
+    vistos: Set[str] = set()
+    pendientes_verdes: List[Dict[str, Any]] = []
+    for meta in datos_bd.values():
+        id_l = meta["id_limpio"]
+        if id_l in vistos:
+            continue
+        vistos.add(id_l)
+        if meta["es_verde"] and meta["costo"] <= 0:
+            pendientes_verdes.append(meta)
+
+    if not pendientes_verdes:
+        print("✅ Todos los productos de 'Empezar aquí' (Verdes) disponibles ya tienen precio extraído.")
+        return 0
+
+    # Priorizar los que ya tienen URL directa `/productos/`
+    pendientes_verdes.sort(key=lambda m: (0 if "/productos/" in m["url_real"] else 1, -m["stock"], m["id_limpio"]))
+
+    print(
+        f"\n⚡ FASE 1: Extrayendo precios en paralelo ({MAX_HILOS_DESCARGA} hilos) "
+        f"para {len(pendientes_verdes):,} SKUs de 'Empezar aquí' (Verdes) sin costo..."
+    )
+
+    extraidos = 0
+    conn = sqlite3.connect(RUTA_BD, timeout=30)
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_HILOS_DESCARGA) as pool:
+            futuros = {
+                pool.submit(
+                    descargar_fotos_y_ficha_ps,
+                    m["id_limpio"],
+                    m["url_real"],
+                    None,
+                    False,
+                ): m
+                for m in pendientes_verdes
+            }
+            for idx, fut in enumerate(as_completed(futuros), 1):
+                meta = futuros[fut]
+                try:
+                    _imgs, ficha, url_f = fut.result()
+                    costo_nuevo = float(ficha.get("costo_socio") or 0.0)
+                    if costo_nuevo > 0:
+                        _actualizar_ficha_en_bd(conn, meta["id_ps"], ficha, url_f)
+                        meta["costo"] = costo_nuevo
+                        if ficha.get("nombre"):
+                            meta["nombre"] = limpiar_titulo(str(ficha["nombre"]))
+                        if url_f.startswith("http"):
+                            meta["url_real"] = url_f
+                        extraidos += 1
+                except Exception:
+                    pass
+
+                if idx % 100 == 0 or idx == len(pendientes_verdes):
+                    conn.commit()
+                    print(
+                        f"   ⏳ Precios Verdes: {idx:,}/{len(pendientes_verdes):,} revisados -> "
+                        f"💰 {extraidos:,} nuevos precios obtenidos..."
+                    )
+        conn.commit()
+    finally:
+        conn.close()
+    return extraidos
+
+
+def _seleccionar_cola_prioritaria_fotos(datos_bd: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Selecciona los SKUs que necesitan generación de sus 4 láminas HD, priorizando:
+      1. 🟢 Cuadrantes Verdes ('Empezar aquí') con Stock > 0 en tienda (para activar ✅ RECOMENDADO de inmediato).
+      2. 🟢 Resto de Cuadrantes Verdes ('Empezar aquí') con Costo > 0 o URL directa.
+      3. 🟠 y ⚪ Otros SKUs con Stock > 0 y Costo > 0.
+    Omite los que ya tienen sus 4 láminas HD generadas (salvo que FORZAR_RERENDER_COMPLETOS=True).
+    """
+    vistos: Set[str] = set()
+    candidatos: List[Dict[str, Any]] = []
+
+    for meta in datos_bd.values():
+        id_l = meta["id_limpio"]
+        if id_l in vistos:
+            continue
+        vistos.add(id_l)
+
+        carpeta = DIR_CATALOGO_LISTO / id_l
+        if not FORZAR_RERENDER_COMPLETOS and carpeta_tiene_4_laminas(carpeta):
+            continue
+
+        # Incluir si es Verde (con costo, stock o URL activa) o si es de otra etapa con stock y costo
+        tiene_datos_web = meta["costo"] > 0 or meta["stock"] > 0 or "/productos/" in meta["url_real"]
+        if (meta["es_verde"] and tiene_datos_web) or (meta["stock"] > 0 and meta["costo"] > 0):
+            candidatos.append(meta)
+
+    def _clave_orden(m: Dict[str, Any]) -> Tuple[int, int, int, int, float]:
+        # 0 = Verde con stock > 0, 1 = Verde con costo > 0, 2 = Otro con stock > 0
+        es_verde_con_stock = 0 if (m["es_verde"] and m["stock"] > 0) else (1 if m["es_verde"] else 2)
+        tiene_costo = 0 if m["costo"] > 0 else 1
+        tiene_url = 0 if "/productos/" in m["url_real"] else 1
+        return (es_verde_con_stock, tiene_costo, tiene_url, -int(m["stock"]), -float(m["costo"]))
+
+    candidatos.sort(key=_clave_orden)
+    return candidatos[:MAX_DESCARGAS_WEB_POR_CORRIDA]
+
+
+def _tarea_descarga_y_render(meta: Dict[str, Any]) -> Tuple[str, bool, Optional[Dict[str, Any]], str, str]:
+    """
+    Ejecuta en un hilo la descarga de fotos (si faltan en disco) y el renderizado de las 4 láminas HD.
+    Devuelve (id_ps, exito, ficha_extraida, url_final, mensaje_log).
+    """
+    id_l = meta["id_limpio"]
+    carpeta = DIR_CATALOGO_LISTO / id_l
+    carpeta.mkdir(parents=True, exist_ok=True)
+
+    img_01_raw, img_02_raw = obtener_imagenes_base_locales(carpeta)
+    ficha_extraida: Optional[Dict[str, Any]] = None
+    url_final = meta.get("url_real", "")
+
+    if img_01_raw is None or img_02_raw is None:
+        descargadas, ficha_w, url_w = descargar_fotos_y_ficha_ps(
+            id_l, url_final, img_01_existente=img_01_raw, descargar_imagenes=True
+        )
+        if ficha_w:
+            ficha_extraida = ficha_w
+            if ficha_w.get("nombre"):
+                meta["nombre"] = limpiar_titulo(str(ficha_w["nombre"]))
+        if url_w:
+            url_final = url_w
+        if descargadas:
+            img_01_raw = descargadas[0]
+            _guardar_imagen(img_01_raw, carpeta / "01_original_raw.jpg")
+            if len(descargadas) > 1:
+                img_02_raw = descargadas[1]
+                _guardar_imagen(img_02_raw, carpeta / "02_angulo_raw.jpg")
+
+    if img_01_raw is None:
+        _borrar_carpeta_si_vacia(carpeta)
+        return meta["id_ps"], False, ficha_extraida, url_final, ""
+
+    perfil, con_segundo_angulo = _renderizar_carrusel(carpeta, meta, img_01_raw, img_02_raw)
+    estado_02 = "2.º ángulo PS" if con_segundo_angulo else "Encuadre detalle 0°"
+    costo_mostrar = float((ficha_extraida or {}).get("costo_socio") or meta.get("costo") or 0.0)
+    msg = (
+        f"✅ [{id_l}] ({meta['cuadrante']} | Costo: ${costo_mostrar:,.0f} | "
+        f"Stock: {meta['stock']} | {perfil['tipo']} | {estado_02}) -> {meta['nombre']}"
+    )
+    return meta["id_ps"], True, ficha_extraida, url_final, msg
+
+
 def ejecutar_estudio_fotografico() -> None:
-    configurar_salida()
-    print("=" * 88)
-    print("📸 PASO 6: ESTUDIO FOTOGRÁFICO HD (EXCLUSIVO CATÁLOGOS PDF OFICIALES)")
-    print("=" * 88)
+    print("=" * 90)
+    print("📸 PASO 6: ESTUDIO FOTOGRÁFICO HD + PRECIOS TURBO (ENFOQUE 'EMPEZAR AQUÍ' - VERDES)")
+    print("=" * 90)
 
     DIR_CATALOGO_LISTO.mkdir(parents=True, exist_ok=True)
     datos_bd = cargar_catalogo_sqlite()
-    apartadas = normalizar_y_depurar_directorios(datos_bd)
-    if apartadas > 0:
-        destino = "eliminaron" if ELIMINAR_DESCARTADAS else f"movieron a {DIR_DESCARTADOS}"
-        print(f"🧹 Se {destino} {apartadas} carpetas fuera de catálogo PDF.")
+    borradas = normalizar_y_depurar_directorios(datos_bd)
+    if borradas > 0:
+        print(f"🧹 Se descartaron y eliminaron {borradas} carpetas antiguas fuera de catálogo PDF.")
 
-    carpetas_por_id: Dict[str, Path] = {}
-    for d in DIR_CATALOGO_LISTO.iterdir():
-        if d.is_dir() and (m := re.search(r"(\d{5,8})", d.name)):
-            cid = m.group(1)
-            carpetas_por_id[cid] = d
-            carpetas_por_id[normalizar_id(cid)] = d
+    # FASE 1: Asegurar precios de todos los SKUs de "Empezar aquí" (Verdes)
+    extraer_precios_verdes_faltantes(datos_bd)
 
-    nuevas_agregadas = 0
-    skus_ordenados = sorted(
-        datos_bd.values(),
-        key=lambda x: (x.get("stock", 0), x.get("costo", 0.0)),
-        reverse=True,
-    )
-    vistos: set[str] = set()
-    for meta in skus_ordenados:
-        if nuevas_agregadas >= MAX_DESCARGAS_WEB_POR_CORRIDA:
-            break
-        id_l = meta["id_limpio"]
-        if id_l in vistos or id_l in carpetas_por_id:
-            continue
-        vistos.add(id_l)
-        if meta["origen_catalogo"] and meta["costo"] > 0 and meta["stock"] > 0:
-            nueva_c = DIR_CATALOGO_LISTO / id_l
-            nueva_c.mkdir(parents=True, exist_ok=True)
-            carpetas_por_id[id_l] = nueva_c
-            nuevas_agregadas += 1
+    # FASE 2: Seleccionar todos los SKUs pendientes de carrusel 4/4 (Verdes primero)
+    cola_pendientes = _seleccionar_cola_prioritaria_fotos(datos_bd)
+    verdes_en_cola = sum(1 for m in cola_pendientes if m["es_verde"])
+    verdes_con_stock = sum(1 for m in cola_pendientes if m["es_verde"] and m["stock"] > 0)
 
-    def prioridad(c: Path) -> Tuple[int, int, str]:
-        cid = m.group(1) if (m := re.search(r"(\d{5,8})", c.name)) else c.name
-        info = datos_bd.get(cid) or datos_bd.get(normalizar_id(cid)) or {}
-        return (1 if info.get("costo", 0) > 0 else 0, int(info.get("stock", 0)), c.name)
-
-    carpetas = sorted([d for d in DIR_CATALOGO_LISTO.iterdir() if d.is_dir()], key=prioridad, reverse=True)
-    total_actualizados = 0
-    descargas_web = 0
-    conservar = {
-        "01_portada_blanca.jpg", "02_angulo_galeria.jpg", "03_ficha_beneficios.jpg", "04_guia_tallas_cm.jpg",
-        "01_original_raw.jpg", "02_angulo_raw.jpg", "01.jpg", "02.jpg", "03.jpg", "04.jpg",
-    }
-
-    for carpeta in carpetas:
-        id_carpeta = m.group(1) if (m := re.search(r"(\d{5,8})", carpeta.name)) else carpeta.name
-        id_limpio = normalizar_id(id_carpeta)
-        meta = datos_bd.get(id_carpeta) or datos_bd.get(id_limpio)
-        if not meta:
-            if datos_bd:
-                descartar_carpeta(carpeta)
-            continue
-
-        img_01_raw, img_02_raw = obtener_imagenes_base_locales(carpeta)
-        falta_foto = img_01_raw is None or img_02_raw is None
-        if falta_foto and descargas_web < MAX_DESCARGAS_WEB_POR_CORRIDA and not intento_web_reciente(carpeta):
-            tenia_01 = img_01_raw is not None
-            descargadas = descargar_fotos_oficiales_ps(id_limpio, meta.get("url_real", ""), img_01_existente=img_01_raw)
-            descargas_web += 1
-            if descargadas:
-                if not tenia_01:
-                    img_01_raw = descargadas[0]
-                    try:
-                        img_01_raw.save(carpeta / "01_original_raw.jpg", **OPCIONES_JPEG)
-                    except OSError:
-                        pass
-                if img_02_raw is None and len(descargadas) > 1:
-                    img_02_raw = descargadas[1]
-                    try:
-                        img_02_raw.save(carpeta / "02_angulo_raw.jpg", **OPCIONES_JPEG)
-                    except OSError:
-                        pass
-            if img_01_raw is None or img_02_raw is None:
-                marcar_intento_web(carpeta)  # no insistir en cada corrida
-
-        if img_01_raw is None:
-            if not any(carpeta.iterdir()):
-                try:
-                    carpeta.rmdir()
-                except OSError:
-                    pass
-            continue
-
-        img_01_rec = recortar_espacio_blanco(img_01_raw)
-        img_02_rec = (
-            recortar_espacio_blanco(img_02_raw)
-            if (img_02_raw is not None and not son_imagenes_iguales(img_01_rec, img_02_raw, revisar_espejo=False))
-            else None
-        )
-
-        perfil = detectar_perfil_prenda(
-            meta["nombre"], meta["marca"], meta["corte"], meta.get("tallas_lista", []), meta.get("origen_catalogo", "")
-        )
-        lam_01 = crear_lamina_01_portada_blanca(img_01_rec)
-        lam_02 = crear_lamina_02_angulo_galeria(img_01_rec, img_02_rec)
-        lam_03 = renderizar_lamina_03_ficha_beneficios(img_01_rec, meta["nombre"], perfil, meta.get("tallas_lista", []))
-        lam_04 = renderizar_lamina_04_guia_tallas_cm(perfil, meta.get("tallas_lista", []))
-
-        for base, lam in (
-            ("01_portada_blanca", lam_01),
-            ("02_angulo_galeria", lam_02),
-            ("03_ficha_beneficios", lam_03),
-            ("04_guia_tallas_cm", lam_04),
-        ):
-            destino = carpeta / f"{base}.jpg"
-            lam.save(destino, **OPCIONES_JPEG)
-            shutil.copyfile(destino, carpeta / f"{base[:2]}.jpg")
-
-        for arch in list(carpeta.glob("*.jpg")) + list(carpeta.glob("*.png")):
-            if arch.name not in conservar:
-                try:
-                    arch.unlink()
-                except OSError:
-                    pass
-
-        estado_02 = "2.º ángulo PS" if img_02_rec is not None else "Encuadre detalle 0°"
-        estado_tallas = f"{len(meta.get('tallas_lista', []))} tallas" if meta.get("tallas_lista") else "sin tallas"
-        total_actualizados += 1
-        print(f"✅ [{id_carpeta}] ({meta['origen_catalogo']} | {perfil['tipo']} | {estado_02} | {estado_tallas}) -> {meta['nombre']}")
-
-    print("=" * 88)
     print(
-        f"🎉 Total actualizado: {total_actualizados} carruseles exclusivos de Catálogos PDF "
-        f"(Web: {descargas_web}/{MAX_DESCARGAS_WEB_POR_CORRIDA})."
+        f"\n🎨 FASE 2: Generando carruseles 4/4 HD en paralelo ({MAX_HILOS_DESCARGA} hilos) para "
+        f"{len(cola_pendientes):,} SKUs pendientes "
+        f"({verdes_en_cola:,} de 'Empezar aquí', {verdes_con_stock:,} con stock en tienda)..."
     )
+
+    total_nuevos_carruseles = 0
+    conn = sqlite3.connect(RUTA_BD, timeout=30)
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_HILOS_DESCARGA) as pool:
+            futuros = {pool.submit(_tarea_descarga_y_render, meta): meta for meta in cola_pendientes}
+            for idx, fut in enumerate(as_completed(futuros), 1):
+                try:
+                    id_ps, exito, ficha_ext, url_f, msg = fut.result()
+                    if ficha_ext:
+                        _actualizar_ficha_en_bd(conn, id_ps, ficha_ext, url_f)
+                    if exito:
+                        total_nuevos_carruseles += 1
+                        print(f"[{idx}/{len(cola_pendientes)}] {msg}")
+                except Exception as e:
+                    print(f"   ⚠️ Aviso en renderizado: {e}")
+
+                if idx % 25 == 0 or idx == len(cola_pendientes):
+                    conn.commit()
+        conn.commit()
+    except KeyboardInterrupt:
+        conn.commit()
+        print("\n⚠️ Proceso pausado por el usuario (Ctrl+C). Los carruseles y precios generados quedaron guardados.")
+    finally:
+        conn.close()
+
+    total_4_de_4 = sum(
+        1 for d in DIR_CATALOGO_LISTO.iterdir() if d.is_dir() and carpeta_tiene_4_laminas(d)
+    )
+    print("=" * 90)
+    print(f"🎉 Nuevos carruseles 4/4 generados en esta corrida : {total_nuevos_carruseles:,}")
+    print(f"📸 Total acumulado de SKUs con carrusel 4/4 HD     : {total_4_de_4:,}")
+    print("=" * 90)
 
     if Path("paso5_motor_financiero.py").exists():
-        print("🔄 Sincronizando diagnóstico 4/4 con paso5_motor_financiero.py...")
+        print("\n🔄 FASE 3: Sincronizando precios, márgenes y diagnóstico 4/4 con paso5_motor_financiero.py...")
         subprocess.run([sys.executable, "paso5_motor_financiero.py"], check=False)
 
 
