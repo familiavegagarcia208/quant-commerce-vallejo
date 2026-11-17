@@ -1,0 +1,162 @@
+2026-11-08 18:17:39,778 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_001739_70844F en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 18:17:51,026 | CRITICAL | sinergia.publico | ALERTA DE PRIVACIDAD: Fuga detectada en activo 01_portada_blanca del SKU 1338647. Guardado abortado.
+2026-11-08 18:17:57,901 | CRITICAL | sinergia.publico | ALERTA DE PRIVACIDAD: Fuga detectada en activo 01_portada_blanca del SKU 1312917. Guardado abortado.
+2026-11-08 18:18:04,518 | CRITICAL | sinergia.publico | ALERTA DE PRIVACIDAD: Fuga detectada en activo 01_portada_blanca del SKU 1340384. Guardado abortado.
+2026-11-08 18:18:04,617 | INFO     | sinergia.publico | Corrida RUN_20261109_001739_70844F finalizada con estado COMPLETADA | Exitosos: 0 | Errores: 3
+2026-11-08 18:23:57,042 | INFO     | sinergia.publico | Se rehabilitaron 3 SKUs previamente bloqueados sin activos.
+2026-11-08 18:23:57,046 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_002357_8B90EE en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 18:24:06,902 | INFO     | sinergia.publico | SKU 1338647 procesado | Stock Bruto: 10 -> Neto: 4
+2026-11-08 18:24:13,140 | INFO     | sinergia.publico | SKU 1312917 procesado | Stock Bruto: 30 -> Neto: 12
+2026-11-08 18:24:19,489 | INFO     | sinergia.publico | SKU 1340384 procesado | Stock Bruto: 60 -> Neto: 24
+2026-11-08 18:24:19,560 | INFO     | sinergia.publico | Corrida RUN_20261109_002357_8B90EE finalizada con estado COMPLETADA | Exitosos: 3 | Errores: 0
+2026-11-08 18:45:14,893 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_004514_C33C33 en modo ETL_COMPLETO | Artículos en lote: 2
+2026-11-08 18:45:25,245 | INFO     | sinergia.publico | SKU 1312917 procesado | Stock Bruto: 30 -> Neto: 12
+2026-11-08 18:45:30,917 | INFO     | sinergia.publico | SKU 1338647 procesado | Stock Bruto: 10 -> Neto: 4
+2026-11-08 18:45:30,989 | INFO     | sinergia.publico | Corrida RUN_20261109_004514_C33C33 finalizada con estado COMPLETADA | Exitosos: 2 | Errores: 0
+2026-11-08 19:14:05,854 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_011405_A6E80B en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 19:14:13,102 | INFO     | sinergia.publico | Caché visual vigente para SKU 1340384; se omite regeneración.
+2026-11-08 19:14:13,103 | INFO     | sinergia.publico | SKU 1340384 procesado | Stock Bruto: 60 -> Neto: 24 | Semáforo: VERDE
+2026-11-08 19:14:16,310 | INFO     | sinergia.publico | Caché visual vigente para SKU 1312917; se omite regeneración.
+2026-11-08 19:14:16,310 | INFO     | sinergia.publico | SKU 1312917 procesado | Stock Bruto: 30 -> Neto: 12 | Semáforo: VERDE
+2026-11-08 19:14:19,845 | INFO     | sinergia.publico | Caché visual vigente para SKU 1338647; se omite regeneración.
+2026-11-08 19:14:19,845 | INFO     | sinergia.publico | SKU 1338647 procesado | Stock Bruto: 10 -> Neto: 4 | Semáforo: AMARILLO
+2026-11-08 19:14:19,986 | INFO     | sinergia.publico | Corrida RUN_20261109_011405_A6E80B finalizada con estado COMPLETADA | Exitosos: 3 | Errores: 0
+2026-11-08 19:22:44,758 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_012244_E33C1D en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 19:22:49,747 | INFO     | sinergia.publico | Caché visual vigente para SKU 1340384; se omite regeneración.
+2026-11-08 19:22:49,748 | INFO     | sinergia.publico | SKU 1340384 procesado | Stock Bruto: 60 -> Neto: 24 | Semáforo: VERDE
+2026-11-08 19:22:52,755 | INFO     | sinergia.publico | Caché visual vigente para SKU 1312917; se omite regeneración.
+2026-11-08 19:22:52,756 | INFO     | sinergia.publico | SKU 1312917 procesado | Stock Bruto: 30 -> Neto: 12 | Semáforo: VERDE
+2026-11-08 19:22:56,153 | INFO     | sinergia.publico | Caché visual vigente para SKU 1338647; se omite regeneración.
+2026-11-08 19:22:56,153 | INFO     | sinergia.publico | SKU 1338647 procesado | Stock Bruto: 10 -> Neto: 4 | Semáforo: AMARILLO
+2026-11-08 19:22:56,277 | INFO     | sinergia.publico | Corrida RUN_20261109_012244_E33C1D finalizada con estado COMPLETADA | Exitosos: 3 | Errores: 0
+2026-11-08 19:32:36,525 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_013236_761659 en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 19:32:37,695 | INFO     | sinergia.publico | Corrida finalizada. Exitosos: 0 | Errores: 3
+2026-11-08 19:32:59,143 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_013259_618B4B en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 19:33:00,424 | INFO     | sinergia.publico | Corrida finalizada. Exitosos: 0 | Errores: 3
+2026-11-08 19:35:53,588 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_013553_684A94 en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 19:35:54,631 | INFO     | sinergia.publico | SKU 1340384 procesado con éxito.
+2026-11-08 19:35:54,643 | INFO     | sinergia.publico | SKU 1312917 procesado con éxito.
+2026-11-08 19:35:54,651 | INFO     | sinergia.publico | SKU 1338647 procesado con éxito.
+2026-11-08 19:35:54,844 | INFO     | sinergia.publico | Corrida finalizada. Exitosos: 3 | Errores: 0
+2026-11-08 19:38:17,423 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_013817_3B3E19 en modo ETL_COMPLETO | Artículos en lote: 3
+2026-11-08 19:38:18,412 | INFO     | sinergia.publico | SKU 1338647 procesado con éxito.
+2026-11-08 19:38:18,423 | INFO     | sinergia.publico | SKU 1312917 procesado con éxito.
+2026-11-08 19:38:18,430 | INFO     | sinergia.publico | SKU 1340384 procesado con éxito.
+2026-11-08 19:38:18,614 | INFO     | sinergia.publico | Corrida finalizada. Exitosos: 3 | Errores: 0
+2026-11-08 22:24:14,020 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_042414_BEC168 (ETL_COMPLETO) | Artículos objetivo: 3
+2026-11-08 22:24:27,657 | INFO     | sinergia.publico | SKU 1338647 completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-08 22:24:37,154 | INFO     | sinergia.publico | SKU 1312917 completado | Stock Bruto: 84 -> Neto: 42 | 4 láminas listas
+2026-11-08 22:24:46,544 | INFO     | sinergia.publico | SKU 1340384 completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-08 22:24:46,697 | INFO     | sinergia.publico | Corrida RUN_20261109_042414_BEC168 finalizada | Exitosos: 3 | Errores: 0 | En cola_meli: 3
+2026-11-09 09:56:29,071 | INFO     | sinergia.publico | Clasificador Omnicategoría: se reclasificaron 3 artículos existentes en SQLite.
+2026-11-09 09:56:29,083 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_155629_7DE08E (ETL_COMPLETO) | Artículos objetivo: 3
+2026-11-09 09:56:51,741 | INFO     | sinergia.publico | SKU 1338647 [Calzado] completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-09 09:57:08,744 | INFO     | sinergia.publico | SKU 1312917 [Calzado] completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-09 09:57:26,715 | INFO     | sinergia.publico | SKU 1340384 [Calzado] completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-09 09:57:26,944 | INFO     | sinergia.publico | Corrida RUN_20261109_155629_7DE08E finalizada | Exitosos: 3 | Errores: 0 | En cola_meli: 3
+2026-11-09 10:46:07,588 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_164607_FDA0B6 (ETL_COMPLETO) | Artículos objetivo: 3
+2026-11-09 10:46:31,644 | INFO     | sinergia.publico | SKU 1338647 [Calzado] completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-09 10:46:50,392 | INFO     | sinergia.publico | SKU 1312917 [Calzado] completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-09 10:47:10,252 | INFO     | sinergia.publico | SKU 1340384 [Calzado] completado | Stock Bruto: 12 -> Neto: 6 | 4 láminas listas
+2026-11-09 10:47:10,478 | INFO     | sinergia.publico | Corrida RUN_20261109_164607_FDA0B6 finalizada | Exitosos: 3 | Errores: 0 | En cola_meli: 3
+2026-11-09 11:50:11,433 | INFO     | sinergia.publico | Autorreparación SQLite: se actualizaron marcas reales, URLs y tallas en 1 registros.
+2026-11-09 11:50:11,436 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_175011_C541A5 (ETL_COMPLETO) | Artículos objetivo: 4
+2026-11-09 11:50:21,273 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 12
+2026-11-09 11:50:27,646 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 36 -> Neto: 12
+2026-11-09 11:50:33,716 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 21 -> Neto: 2
+2026-11-09 11:50:40,133 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 34 -> Neto: 7
+2026-11-09 11:50:40,216 | INFO     | sinergia.publico | Corrida RUN_20261109_175011_C541A5 finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 11:51:33,722 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_175133_2ED5E2 (SOLO_RENDER) | Artículos objetivo: 1
+2026-11-09 11:51:39,262 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 78 -> Neto: 26
+2026-11-09 11:51:39,272 | INFO     | sinergia.publico | Corrida RUN_20261109_175133_2ED5E2 finalizada | Exitosos: 1 | Errores: 0 | En cola_meli: 4
+2026-11-09 11:52:27,058 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_175227_B71352 (ETL_COMPLETO) | Artículos objetivo: 4
+2026-11-09 11:52:33,828 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 36 -> Neto: 12
+2026-11-09 11:52:39,856 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 21 -> Neto: 2
+2026-11-09 11:52:46,051 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 34 -> Neto: 7
+2026-11-09 11:52:57,614 | INFO     | sinergia.publico | SKU 1338647 | Marca: Ingresar A Mi Cuenta | Cat: Calzado | Bruto: 68 -> Neto: 26
+2026-11-09 11:52:57,693 | INFO     | sinergia.publico | Corrida RUN_20261109_175227_B71352 finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 12:02:33,994 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales y tallas en 4 productos.
+2026-11-09 12:02:33,999 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_180233_CE86FA (SOLO_RENDER) | Artículos objetivo: 4
+2026-11-09 12:02:39,162 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 16
+2026-11-09 12:02:44,225 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 22 -> Neto: 1
+2026-11-09 12:02:49,299 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 24 -> Neto: 6
+2026-11-09 12:02:54,270 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 21 -> Neto: 2
+2026-11-09 12:02:54,274 | INFO     | sinergia.publico | Corrida RUN_20261109_180233_CE86FA finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 12:03:43,919 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales y tallas en 4 productos.
+2026-11-09 12:03:43,922 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_180343_A95D27 (SOLO_RENDER) | Artículos objetivo: 1
+2026-11-09 12:03:49,425 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 16
+2026-11-09 12:03:49,437 | INFO     | sinergia.publico | Corrida RUN_20261109_180343_A95D27 finalizada | Exitosos: 1 | Errores: 0 | En cola_meli: 4
+2026-11-09 12:12:34,709 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales y tallas en 4 productos.
+2026-11-09 12:12:34,713 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_181234_054E79 (ETL_COMPLETO) | Artículos objetivo: 4
+2026-11-09 12:12:42,506 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 16
+2026-11-09 12:12:48,228 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 22 -> Neto: 1
+2026-11-09 12:12:53,923 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 24 -> Neto: 6
+2026-11-09 12:13:00,084 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 21 -> Neto: 2
+2026-11-09 12:13:00,157 | INFO     | sinergia.publico | Corrida RUN_20261109_181234_054E79 finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 12:16:10,306 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales y tallas en 4 productos.
+2026-11-09 12:16:10,311 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_181610_7383C8 (SOLO_RENDER) | Artículos objetivo: 1
+2026-11-09 12:16:18,222 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 40 -> Neto: 9
+2026-11-09 12:16:18,307 | INFO     | sinergia.publico | Corrida RUN_20261109_181610_7383C8 finalizada | Exitosos: 1 | Errores: 0 | En cola_meli: 4
+2026-11-09 17:38:47,081 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales y tallas en 4 productos.
+2026-11-09 17:38:47,086 | INFO     | sinergia.publico | Iniciando corrida RUN_20261109_233847_04F926 (SOLO_RENDER) | Artículos objetivo: 4
+2026-11-09 17:38:48,364 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 16
+2026-11-09 17:38:52,378 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 22 -> Neto: 1
+2026-11-09 17:38:56,374 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 24 -> Neto: 6
+2026-11-09 17:38:57,207 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 40 -> Neto: 9
+2026-11-09 17:38:57,212 | INFO     | sinergia.publico | Corrida RUN_20261109_233847_04F926 finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 18:03:21,938 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales, tallas y cachés en 4 productos.
+2026-11-09 18:03:21,943 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_000321_FFC186 (ETL_COMPLETO) | Artículos objetivo: 4
+2026-11-09 18:03:31,289 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 16
+2026-11-09 18:03:36,302 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 22 -> Neto: 1
+2026-11-09 18:03:41,445 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 24 -> Neto: 6
+2026-11-09 18:03:52,274 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 40 -> Neto: 9
+2026-11-09 18:03:52,365 | INFO     | sinergia.publico | Corrida RUN_20261110_000321_FFC186 finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 20:24:42,622 | INFO     | sinergia.publico | Autorreparación SQLite: se limpiaron marcas reales, tallas y cachés en 4 productos.
+2026-11-09 20:24:42,631 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_022442_36B861 (ETL_COMPLETO) | Artículos objetivo: 4
+2026-11-09 20:24:54,138 | INFO     | sinergia.publico | SKU 1338647 | Marca: Sonic | Cat: Calzado | Bruto: 40 -> Neto: 16
+2026-11-09 20:25:01,028 | INFO     | sinergia.publico | SKU 1312917 | Marca: Adidas | Cat: Calzado | Bruto: 22 -> Neto: 1
+2026-11-09 20:25:07,587 | INFO     | sinergia.publico | SKU 1340384 | Marca: Puma | Cat: Calzado | Bruto: 24 -> Neto: 6
+2026-11-09 20:25:21,733 | INFO     | sinergia.publico | SKU 1359012 | Marca: Belinda | Cat: Ropa | Bruto: 40 -> Neto: 9
+2026-11-09 20:25:21,835 | INFO     | sinergia.publico | Corrida RUN_20261110_022442_36B861 finalizada | Exitosos: 4 | Errores: 0 | En cola_meli: 4
+2026-11-09 20:44:06,364 | INFO     | sinergia.publico | Se eliminaron 1 productos ficticios de demostración.
+2026-11-09 20:44:06,373 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_024406_73939A (ETL_COMPLETO) | IDs de catálogo: 3
+2026-11-09 20:44:18,073 | INFO     | sinergia.publico | ID 1338647 | Marca: Sonic | URL: [URL_OCULTA]
+2026-11-09 20:44:22,774 | INFO     | sinergia.publico | ID 1312917 | Marca: Adidas | URL: [URL_OCULTA]
+2026-11-09 20:44:27,410 | INFO     | sinergia.publico | ID 1340384 | Marca: Puma | URL: [URL_OCULTA]
+2026-11-09 20:44:27,511 | INFO     | sinergia.publico | Corrida RUN_20261110_024406_73939A finalizada | Exitosos: 3 | Errores: 0 | En cola_meli: 3
+2026-11-09 20:45:35,552 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_024535_B57187 (ETL_COMPLETO) | IDs de catálogo: 3
+2026-11-09 20:45:43,228 | INFO     | sinergia.publico | ID 1338647 | Marca: Sonic | URL: [URL_OCULTA]
+2026-11-09 20:45:49,708 | INFO     | sinergia.publico | ID 1312917 | Marca: Adidas | URL: [URL_OCULTA]
+2026-11-09 20:45:56,378 | INFO     | sinergia.publico | ID 1340384 | Marca: Puma | URL: [URL_OCULTA]
+2026-11-09 20:45:56,465 | INFO     | sinergia.publico | Corrida RUN_20261110_024535_B57187 finalizada | Exitosos: 3 | Errores: 0 | En cola_meli: 3
+2026-11-09 21:14:27,554 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_031427_7FA90D (ETL_COMPLETO) | IDs de catálogo: 3
+2026-11-09 21:14:39,136 | INFO     | sinergia.publico | ID 1338647 | Marca: Sonic | URL: [URL_OCULTA]
+2026-11-09 21:14:46,191 | INFO     | sinergia.publico | ID 1312917 | Marca: Adidas | URL: [URL_OCULTA]
+2026-11-09 21:14:52,925 | INFO     | sinergia.publico | ID 1340384 | Marca: Puma | URL: [URL_OCULTA]
+2026-11-09 21:14:53,031 | INFO     | sinergia.publico | Corrida RUN_20261110_031427_7FA90D finalizada | Exitosos: 3 | Errores: 0 | En cola_meli: 3
+2026-11-10 15:36:48,298 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_213648_C0323A (ETL_COMPLETO) | IDs de catálogo: 3
+2026-11-10 15:37:01,682 | INFO     | sinergia.publico | ID 1338647 | Catálogo: Choclo | Marca: Sonic | Bruto: 40 -> Neto: 32
+2026-11-10 15:37:08,743 | INFO     | sinergia.publico | ID 1312917 | Catálogo: Choclo | Marca: Adidas | Bruto: 22 -> Neto: 14
+2026-11-10 15:37:15,474 | INFO     | sinergia.publico | ID 1340384 | Catálogo: Choclo | Marca: Puma | Bruto: 24 -> Neto: 18
+2026-11-10 15:37:15,573 | INFO     | sinergia.publico | Corrida RUN_20261110_213648_C0323A finalizada | Exitosos: 3 | Errores: 0 | Publicables en Meli: 0
+2026-11-10 15:45:24,052 | INFO     | sinergia.publico | Iniciando corrida RUN_20261110_214524_2B8ABB (SOLO_RENDER) | IDs de catálogo: 3
+2026-11-10 15:45:29,019 | INFO     | sinergia.publico | ID 1338647 | Catálogo: Choclo | Marca: Sonic | Bruto: 40 -> Neto: 32
+2026-11-10 15:45:32,987 | INFO     | sinergia.publico | ID 1312917 | Catálogo: Choclo | Marca: Adidas | Bruto: 22 -> Neto: 14
+2026-11-10 15:45:36,659 | INFO     | sinergia.publico | ID 1340384 | Catálogo: Choclo | Marca: Puma | Bruto: 24 -> Neto: 18
+2026-11-10 15:45:36,667 | INFO     | sinergia.publico | Corrida RUN_20261110_214524_2B8ABB finalizada | Exitosos: 3 | Errores: 0 | Publicables en Meli: 0
+2026-11-10 22:15:21,018 | INFO     | sinergia.publico | Iniciando corrida RUN_20261111_041521_BCD117 (ETL_COMPLETO) | IDs de catálogo: 1
+2026-11-10 22:15:39,489 | INFO     | sinergia.publico | ID 1342222 | Catálogo: Catálogo Urbano y Casual | Marca: Original | Bruto: 38 -> Neto: 30
+2026-11-10 22:16:05,175 | INFO     | sinergia.publico | Corrida RUN_20261111_041521_BCD117 finalizada | Exitosos: 1 | Errores: 0 | Publicables en Meli: 21964
+2026-11-10 22:39:03,719 | INFO     | sinergia.publico | Iniciando corrida RUN_20261111_043903_0051F3 (ETL_COMPLETO) | IDs de catálogo: 1
+2026-11-10 22:39:15,287 | INFO     | sinergia.publico | ID 1342498 | Catálogo: Catálogo Urbano y Casual | Marca: Reebok | Bruto: 38 -> Neto: 30
+2026-11-10 22:39:23,288 | INFO     | sinergia.publico | Corrida RUN_20261111_043903_0051F3 finalizada | Exitosos: 1 | Errores: 0 | Publicables en Meli: 21964
+2026-11-10 22:39:47,446 | INFO     | sinergia.publico | Iniciando corrida RUN_20261111_043947_41D2E0 (ETL_COMPLETO) | IDs de catálogo: 1
+2026-11-10 22:39:52,748 | INFO     | sinergia.publico | ID 1342498 | Catálogo: Catálogo Urbano y Casual | Marca: Reebok | Bruto: 38 -> Neto: 30
+2026-11-10 22:40:00,869 | INFO     | sinergia.publico | Corrida RUN_20261111_043947_41D2E0 finalizada | Exitosos: 1 | Errores: 0 | Publicables en Meli: 21964
+2026-11-10 22:52:31,640 | INFO     | sinergia.publico | Iniciando corrida RUN_20261111_045231_14972A (ETL_COMPLETO) | IDs de catálogo: 1
+2026-11-10 22:52:39,597 | INFO     | sinergia.publico | ID 1342230 | Catálogo: Catálogo Escolares e Infantil | Marca: Original | Bruto: 38 -> Neto: 30
+2026-11-10 22:52:47,659 | INFO     | sinergia.publico | Corrida RUN_20261111_045231_14972A finalizada | Exitosos: 1 | Errores: 0 | Publicables en Meli: 21964
+2026-11-11 10:30:00 [INFO] Planificador Doble Carril: Carril A (24h MeLi)=30 SKUs | Carril B (Semanal)=100 SKUs
+2026-11-11 14:59:44 [INFO] Planificador Doble Carril: Carril A (24h MeLi)=0 SKUs | Carril B (Semanal)=100 SKUs
+2026-11-11 15:35:09 [INFO] Planificador Doble Carril: Carril A (24h MeLi)=30 SKUs | Carril B (Semanal)=100 SKUs
+2026-11-11 15:47:47 [INFO] Planificador Doble Carril: Carril A (24h MeLi)=30 SKUs | Carril B (Semanal)=100 SKUs

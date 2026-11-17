@@ -4,7 +4,7 @@ PASO 5: MOTOR FINANCIERO, FISCAL Y DE BLINDAJE DE INVENTARIO (ROPA Y CALZADO)
 =========================================================================================
 Responsabilidad Única (SRP):
 1. Sanitización Estricta (Pandas ETL): Limpia valores NaN, nulos o corruptos.
-2. Normalización Híbrida de Tallas: Soporta tallas textiles (XCH, CH, M, G, EG, 2EG, 
+2. Normalización Híbrida de Tallas: Soporta tallas textiles (XCH, CH, M, G, EG, 2EG,
    UNITALLA, 28, 30, 32, 34) y tallas de calzado en centímetros (22.0 a 31.5).
 3. Blindaje Operativo por Talla:
    Stock Publicable = MAX(0, Stock Físico Vallejo - 6)
@@ -19,7 +19,7 @@ import math
 import re
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import pandas as pd
 
@@ -45,7 +45,18 @@ RETENCION_IVA_ML: float = 0.08
 RETENCION_ISR_ML: float = 0.025
 RETENCION_SAT_EFECTIVA: float = (RETENCION_IVA_ML + RETENCION_ISR_ML) / (1.0 + IVA_TASA)
 TASA_MERMA_SOBRE_COSTO: float = 0.03    # 3% de autoseguro sobre el costo
-MARGEN_NETO_SOBRE_COSTO: float = 0.25   # 25% de ganancia neta limpia sobre el costo
+UTILIDAD_MINIMA_SOBRE_VENTA: float = 0.10  # utilidad mínima: 10% del precio de venta
+LOGISTICA_POR_PIEZA: float = 60.0          # costo en pesos de ir por el producto y empacarlo
+
+SEMAFORO_RECOMENDADO: str = "✅ RECOMENDADO"
+SEMAFORO_NO_RECOMENDADO: str = "⚠️ NO RECOMENDADO"
+
+ARCHIVOS_LAMINAS: Tuple[str, ...] = (
+    "01_portada_blanca.jpg",
+    "02_angulo_galeria.jpg",
+    "03_ficha_beneficios.jpg",
+    "04_guia_tallas_cm.jpg",
+)
 
 PALABRAS_ROPA: List[str] = [
     "camisa", "blusa", "playera", "pantalon", "pantalón", "jeans", "mezclilla",
@@ -55,20 +66,63 @@ PALABRAS_ROPA: List[str] = [
     "pijama", "bata", "brassiere", "brasier", "boxer", "bóxer", "trusa", "calceta",
 ]
 
+# Mapeo canónico de tallas de ropa por letra (México / Internacional)
+MAPA_TALLAS_LETRA: Dict[str, str] = {
+    "XXS": "2XCH", "2XCH": "2XCH",
+    "XS": "XCH", "XCH": "XCH", "ECH": "XCH", "EXTRA CHICA": "XCH",
+    "S": "CH", "CH": "CH", "CHICA": "CH",
+    "M": "M", "MED": "M", "MEDIANA": "M",
+    "L": "G", "G": "G", "GDE": "G", "GRANDE": "G",
+    "XL": "EG", "EG": "EG", "XG": "EG", "EXTRA GRANDE": "EG",
+    "XXL": "2EG", "2XL": "2EG", "2EG": "2EG", "EEG": "2EG",
+    "3XL": "3EG", "3EG": "3EG",
+    "UNI": "UNITALLA", "UNITALLA": "UNITALLA", "U": "UNITALLA",
+}
+
+# Reglas (etiqueta, palabras clave): gana la primera regla con alguna palabra en el nombre
+Reglas = Sequence[Tuple[str, Sequence[str]]]
+
+CATEGORIA_DEFAULT: str = "Casual / Urbano"
+REGLAS_CATEGORIA: Reglas = (
+    ("Camisa / Blusa / Playera", ["blusa", "camisa", "playera", "polo", "top", "crop", "body"]),
+    ("Pantalón / Jeans", ["pantalon", "pantalón", "jeans", "mezclilla", "jogger", "legging", "short", "bermuda", "pans"]),
+    ("Vestido / Falda", ["vestido", "falda", "jumper", "palazzo", "enterizo"]),
+    ("Chamarra / Sudadera / Suéter", ["chamarra", "sudadera", "sueter", "suéter", "cardigan", "chaleco", "abrigo", "saco", "blazer", "conjunto"]),
+    ("Ropa Interior / Pijama", ["pijama", "bata", "brasier", "brassiere", "boxer", "bóxer", "lenceria", "lencería"]),
+    ("Tenis / Deportivo", ["tenis", "sneaker", "runner", "running", "deportivo", "skate"]),
+    ("Bota / Botín", ["bota", "botin", "botín", "industrial", "tactica", "táctica", "hiking"]),
+    ("Sandalia / Confort", ["sandalia", "huarache", "chancla", "slide", "mule", "pantufla"]),
+    ("Formal / Escolar", ["escolar", "vestir", "oxford", "derby", "mocasin", "mocasín", "formal"]),
+)
+
+GENERO_INFANTIL: str = "Infantil / Juvenil"
+PALABRAS_INFANTIL: Sequence[str] = ("niño", "niña", "infantil", "kids", "junior", "escolar", "bebé")
+REGLAS_GENERO: Reglas = (
+    ("Hombre", ["caballero", "hombre", "varon", "varón", "men", "camisa"]),
+    ("Mujer", ["dama", "mujer", "women", "blusa", "vestido", "falda", "tacón", "tacon", "zapatilla", "legging"]),
+)
+
+COLOR_DEFAULT: str = "Multicolor / Clásico"
+REGLAS_COLOR: Reglas = (
+    ("Negro", ["negro", "black", "onix", "ónix"]),
+    ("Blanco", ["blanco", "white", "hueso", "ivory", "perla", "crudo"]),
+    ("Café / Miel / Beige", ["cafe", "café", "miel", "camel", "tan", "chocolate", "arena", "beige", "caqui", "khaki"]),
+    ("Azul / Mezclilla", ["azul", "marino", "navy", "denim", "mezclilla", "celeste", "rey"]),
+    ("Rojo / Vino", ["rojo", "vino", "tinto", "guinda", "coral", "terracota"]),
+    ("Gris / Plata", ["gris", "plata", "silver", "plomo", "oxford", "jaspe"]),
+    ("Rosa / Lila", ["rosa", "fiusha", "fucsia", "lila", "morado", "lavanda", "bugambilia"]),
+    ("Verde / Olivo", ["verde", "olivo", "militar", "menta", "esmeralda", "sage"]),
+)
+
+CATEGORIAS_ENVIO_LIGERO: Tuple[str, ...] = ("Camisa / Blusa / Playera", "Ropa Interior / Pijama")
+CATEGORIAS_ENVIO_MEDIO: Tuple[str, ...] = ("Pantalón / Jeans", "Vestido / Falda")
+
 
 # ===========================================================================
 # 1. FUNCIONES DE CLASIFICACIÓN Y NORMALIZACIÓN HÍBRIDA (ROPA + CALZADO)
 # ===========================================================================
 def es_prenda_textil(nombre_modelo: str) -> bool:
-    """
-    Determina si un artículo pertenece a la división de Ropa/Textil según su nombre.
-
-    Args:
-        nombre_modelo (str): Nombre del artículo en el catálogo.
-
-    Returns:
-        bool: True si es prenda de vestir, False si es calzado.
-    """
+    """Determina si un artículo pertenece a la división de Ropa/Textil según su nombre."""
     nombre_low: str = str(nombre_modelo).lower()
     return any(palabra in nombre_low for palabra in PALABRAS_ROPA)
 
@@ -76,10 +130,6 @@ def es_prenda_textil(nombre_modelo: str) -> bool:
 def normalizar_talla_universal(valor_talla: str | float, es_ropa: bool = False) -> str:
     """
     Estandariza tallas tanto de Ropa (letras y cintura/edad) como de Calzado (cm MX).
-
-    Args:
-        valor_talla (str | float): Talla cruda almacenada en la base de datos.
-        es_ropa (bool): Indica si el SKU es una prenda textil.
 
     Returns:
         str: Talla estandarizada ('CH', 'M', 'G', 'EG', '32', 'UNITALLA' o '25.5').
@@ -90,27 +140,17 @@ def normalizar_talla_universal(valor_talla: str | float, es_ropa: bool = False) 
     texto_limpio: str = str(valor_talla).strip().upper()
     if not texto_limpio:
         return "N/A"
-
-    # 1. Mapeo canónico de tallas de ropa por letra (México / Internacional)
-    mapa_tallas_letra: Dict[str, str] = {
-        "XXS": "2XCH", "2XCH": "2XCH",
-        "XS": "XCH", "XCH": "XCH", "ECH": "XCH", "EXTRA CHICA": "XCH",
-        "S": "CH", "CH": "CH", "CHICA": "CH",
-        "M": "M", "MED": "M", "MEDIANA": "M",
-        "L": "G", "G": "G", "GDE": "G", "GRANDE": "G",
-        "XL": "EG", "EG": "EG", "XG": "EG", "EXTRA GRANDE": "EG",
-        "XXL": "2EG", "2XL": "2EG", "2EG": "2EG", "EEG": "2EG",
-        "3XL": "3EG", "3EG": "3EG",
-        "UNI": "UNITALLA", "UNITALLA": "UNITALLA", "U": "UNITALLA",
-    }
-    if texto_limpio in mapa_tallas_letra:
-        return mapa_tallas_letra[texto_limpio]
+    if texto_limpio in MAPA_TALLAS_LETRA:
+        return MAPA_TALLAS_LETRA[texto_limpio]
 
     # Si contiene letras y no es simplemente "TALLA X", devolver en mayúsculas
     if re.search(r"[A-Z]", texto_limpio) and not texto_limpio.startswith("TALLA"):
         return texto_limpio
+    return _normalizar_talla_numerica(texto_limpio, es_ropa)
 
-    # 2. Extracción numérica para cintura/pantalón o calzado
+
+def _normalizar_talla_numerica(texto_limpio: str, es_ropa: bool) -> str:
+    """Talla numérica: cintura/edad de ropa (entero) o calzado en centímetros (un decimal)."""
     coincidencias = re.findall(r"\d+(?:\.\d+)?", texto_limpio)
     if not coincidencias:
         return texto_limpio
@@ -118,7 +158,8 @@ def normalizar_talla_universal(valor_talla: str | float, es_ropa: bool = False) 
     numero: float = float(coincidencias[0])
 
     # Si es Ropa (ej. Pantalón talla 28, 30, 32 o Infantil 4, 6, 8, 10, 12), mantener entero
-    if es_ropa or (numero >= 28.0 and numero.is_integer() and "." not in texto_limpio):
+    es_cintura = numero >= 28.0 and numero.is_integer() and "." not in texto_limpio
+    if es_ropa or es_cintura:
         return str(int(numero)) if numero.is_integer() else f"{numero:.1f}"
 
     # Si es Calzado con numeración abreviada (ej. 2.0 a 11.5 -> 22.0 a 31.5 cm)
@@ -127,83 +168,54 @@ def normalizar_talla_universal(valor_talla: str | float, es_ropa: bool = False) 
     return f"{numero:.1f}"
 
 
+def _primera_etiqueta(texto: str, reglas: Reglas, default: str) -> str:
+    """Etiqueta de la primera regla que tenga alguna de sus palabras dentro del texto."""
+    return next(
+        (etiqueta for etiqueta, palabras in reglas if any(p in texto for p in palabras)),
+        default,
+    )
+
+
+def _rango_tallas_calzado(lista_tallas: List[str]) -> Tuple[float, float]:
+    """(mínima, máxima) de las tallas de calzado en cm; (0.0, 0.0) si no hay ninguna."""
+    tallas_num_calzado = [
+        float(t) for t in lista_tallas
+        if re.match(r"^\d{2}\.\d$", str(t))
+    ]
+    if not tallas_num_calzado:
+        return 0.0, 0.0
+    return min(tallas_num_calzado), max(tallas_num_calzado)
+
+
+def _detectar_genero(nombre_low: str, lista_tallas: List[str]) -> str:
+    """Género por palabras del nombre y, si no hay, por el rango de tallas de calzado."""
+    t_min, t_max = _rango_tallas_calzado(lista_tallas)
+
+    if any(k in nombre_low for k in PALABRAS_INFANTIL) or 0.0 < t_max <= 21.5:
+        return GENERO_INFANTIL
+    genero = _primera_etiqueta(nombre_low, REGLAS_GENERO, "")
+    if genero:
+        return genero
+    if t_max >= 27.0 or t_min >= 25.0:
+        return "Hombre"
+    if 21.5 <= t_max <= 26.5:
+        return "Mujer"
+    return "Unisex"
+
+
 def clasificar_atributos_catalogo(
     nombre_modelo: str, lista_tallas: List[str]
 ) -> Tuple[str, str, str]:
     """
     Deduce Género, Categoría (Ropa o Calzado) y Color a partir del nombre y sus tallas.
 
-    Args:
-        nombre_modelo (str): Nombre limpio del producto.
-        lista_tallas (List[str]): Lista de tallas normalizadas del producto.
-
     Returns:
         Tuple[str, str, str]: (genero, categoria, color)
     """
     n: str = nombre_modelo.lower()
-
-    # 1. Categoría (Ropa vs Calzado)
-    if any(k in n for k in ["blusa", "camisa", "playera", "polo", "top", "crop", "body"]):
-        categoria = "Camisa / Blusa / Playera"
-    elif any(k in n for k in ["pantalon", "pantalón", "jeans", "mezclilla", "jogger", "legging", "short", "bermuda", "pans"]):
-        categoria = "Pantalón / Jeans"
-    elif any(k in n for k in ["vestido", "falda", "jumper", "palazzo", "enterizo"]):
-        categoria = "Vestido / Falda"
-    elif any(k in n for k in ["chamarra", "sudadera", "sueter", "suéter", "cardigan", "chaleco", "abrigo", "saco", "blazer", "conjunto"]):
-        categoria = "Chamarra / Sudadera / Suéter"
-    elif any(k in n for k in ["pijama", "bata", "brasier", "brassiere", "boxer", "bóxer", "lenceria", "lencería"]):
-        categoria = "Ropa Interior / Pijama"
-    elif any(k in n for k in ["tenis", "sneaker", "runner", "running", "deportivo", "skate"]):
-        categoria = "Tenis / Deportivo"
-    elif any(k in n for k in ["bota", "botin", "botín", "industrial", "tactica", "táctica", "hiking"]):
-        categoria = "Bota / Botín"
-    elif any(k in n for k in ["sandalia", "huarache", "chancla", "slide", "mule", "pantufla"]):
-        categoria = "Sandalia / Confort"
-    elif any(k in n for k in ["escolar", "vestir", "oxford", "derby", "mocasin", "mocasín", "formal"]):
-        categoria = "Formal / Escolar"
-    else:
-        categoria = "Casual / Urbano"
-
-    # 2. Género
-    tallas_num_calzado = [
-        float(t) for t in lista_tallas
-        if re.match(r"^\d{2}\.\d$", str(t))
-    ]
-    t_max = max(tallas_num_calzado) if tallas_num_calzado else 0.0
-    t_min = min(tallas_num_calzado) if tallas_num_calzado else 0.0
-
-    if any(k in n for k in ["niño", "niña", "infantil", "kids", "junior", "escolar", "bebé"]) or (
-        0.0 < t_max <= 21.5
-    ):
-        genero = "Infantil / Juvenil"
-    elif any(k in n for k in ["caballero", "hombre", "varon", "varón", "men", "camisa"]):
-        genero = "Hombre"
-    elif any(k in n for k in ["dama", "mujer", "women", "blusa", "vestido", "falda", "tacón", "tacon", "zapatilla", "legging"]):
-        genero = "Mujer"
-    elif t_max >= 27.0 or t_min >= 25.0:
-        genero = "Hombre"
-    elif 21.5 <= t_max <= 26.5:
-        genero = "Mujer"
-    else:
-        genero = "Unisex"
-
-    # 3. Color
-    mapa_colores = [
-        ("Negro", ["negro", "black", "onix", "ónix"]),
-        ("Blanco", ["blanco", "white", "hueso", "ivory", "perla", "crudo"]),
-        ("Café / Miel / Beige", ["cafe", "café", "miel", "camel", "tan", "chocolate", "arena", "beige", "caqui", "khaki"]),
-        ("Azul / Mezclilla", ["azul", "marino", "navy", "denim", "mezclilla", "celeste", "rey"]),
-        ("Rojo / Vino", ["rojo", "vino", "tinto", "guinda", "coral", "terracota"]),
-        ("Gris / Plata", ["gris", "plata", "silver", "plomo", "oxford", "jaspe"]),
-        ("Rosa / Lila", ["rosa", "fiusha", "fucsia", "lila", "morado", "lavanda", "bugambilia"]),
-        ("Verde / Olivo", ["verde", "olivo", "militar", "menta", "esmeralda", "sage"]),
-    ]
-    color = "Multicolor / Clásico"
-    for etiqueta_col, palabras in mapa_colores:
-        if any(p in n for p in palabras):
-            color = etiqueta_col
-            break
-
+    categoria = _primera_etiqueta(n, REGLAS_CATEGORIA, CATEGORIA_DEFAULT)
+    genero = _detectar_genero(n, lista_tallas)
+    color = _primera_etiqueta(n, REGLAS_COLOR, COLOR_DEFAULT)
     return genero, categoria, color
 
 
@@ -214,20 +226,13 @@ def estimar_envio_mercado_envios(costo_socio: float, categoria: str) -> float:
     """
     Determina el costo real de la guía de Mercado Envíos diferenciando el peso volumétrico
     de prendas textiles ligeras (< 0.5 kg), prendas medias (< 1 kg) y calzado en caja.
-
-    Args:
-        costo_socio (float): Costo de socio en sucursal Vallejo (> 0).
-        categoria (str): Categoría clasificada del artículo.
-
-    Returns:
-        float: Costo de envío en pesos mexicanos ($ MXN).
     """
     # Ropa ligera (Blusas, Camisas, Playeras, Ropa Interior): Paquete bolsa < 500g
-    if categoria in ("Camisa / Blusa / Playera", "Ropa Interior / Pijama"):
+    if categoria in CATEGORIAS_ENVIO_LIGERO:
         return 86.0 if costo_socio < 350.0 else 94.0
 
     # Ropa peso medio (Pantalones, Jeans, Vestidos): Paquete 500g a 1kg
-    if categoria in ("Pantalón / Jeans", "Vestido / Falda"):
+    if categoria in CATEGORIAS_ENVIO_MEDIO:
         return 94.0 if costo_socio < 450.0 else 106.0
 
     # Chamarras, Sudaderas y Calzado en caja (1kg a 2kg volumétrico)
@@ -245,19 +250,28 @@ def redondeo_comercial_decena(valor: float) -> float:
     return float(int(math.ceil(valor / 10.0) * 10) - 1)
 
 
+def redondeo_minimo_terminado_en_9(valor: float) -> float:
+    """
+    Menor precio terminado en 9 que NO queda por debajo del valor (ej. 642 -> 649, 649.2 -> 659).
+    A diferencia de `redondeo_comercial_decena`, nunca baja del valor, así que respeta un mínimo.
+    """
+    if valor <= 0.0:
+        return 0.0
+    return float(math.ceil((valor - 9.0) / 10.0) * 10 + 9)
+
+
 def calcular_unit_economics_por_articulo(
     costo_socio: float,
     categoria: str = "Casual / Urbano",
-    margen_objetivo_costo: float = MARGEN_NETO_SOBRE_COSTO,
+    utilidad_sobre_venta: float = UTILIDAD_MINIMA_SOBRE_VENTA,
 ) -> Dict[str, float]:
     """
-    Despeja algebraicamente el Precio de Venta en Mercado Libre (P):
-      P = [ Costo * (1 + Merma_3% + Margen_25%) + Envío ] / [ 1 - Comisión_17.5% - Retención_SAT_9.05% ]
-
-    Args:
-        costo_socio (float): Costo unitario en Vallejo sanitizado (float >= 0).
-        categoria (str): Categoría del producto para determinar la tarifa de envío.
-        margen_objetivo_costo (float): Margen limpio objetivo sobre el costo (default 0.25).
+    Despeja algebraicamente el Precio de Venta en Mercado Libre (P) para que la utilidad sea
+    al menos el 10% del propio precio de venta:
+      P = [ Costo * (1 + Merma_3%) + Envío + Logística ]
+          / [ 1 - Comisión_17.5% - Retención_SAT_9.05% - Utilidad_10% ]
+    El redondeo comercial es hacia arriba, así que la utilidad nunca baja del mínimo.
+    `precio_piso_ml` es ese mismo precio: por debajo de él no se cumple la utilidad mínima.
 
     Returns:
         Dict[str, float]: Diccionario con todos los rubros financieros unitarios redondeados.
@@ -277,20 +291,19 @@ def calcular_unit_economics_por_articulo(
     envio: float = estimar_envio_mercado_envios(costo_socio, categoria)
     denominador_retenciones: float = 1.0 - COMISION_ML_CLASICA - RETENCION_SAT_EFECTIVA  # 0.73448276
 
-    numerador_optimo: float = (
-        costo_socio * (1.0 + TASA_MERMA_SOBRE_COSTO + margen_objetivo_costo)
-    ) + envio
-    precio_ml: float = redondeo_comercial_decena(numerador_optimo / denominador_retenciones)
-
-    numerador_piso: float = (costo_socio * (1.0 + TASA_MERMA_SOBRE_COSTO)) + envio + 70.0
-    precio_piso_ml: float = redondeo_comercial_decena(numerador_piso / denominador_retenciones)
+    costos_fijos: float = (costo_socio * (1.0 + TASA_MERMA_SOBRE_COSTO)) + envio + LOGISTICA_POR_PIEZA
+    precio_ml: float = redondeo_minimo_terminado_en_9(
+        costos_fijos / (denominador_retenciones - utilidad_sobre_venta)
+    )
+    precio_piso_ml: float = precio_ml
 
     comision_pesos: float = round(precio_ml * COMISION_ML_CLASICA, 2)
     impuestos_sat_pesos: float = round(precio_ml * RETENCION_SAT_EFECTIVA, 2)
     fondo_merma_pesos: float = round(costo_socio * TASA_MERMA_SOBRE_COSTO, 2)
 
     utilidad_neta: float = round(
-        precio_ml - costo_socio - envio - comision_pesos - impuestos_sat_pesos - fondo_merma_pesos,
+        precio_ml - costo_socio - envio - LOGISTICA_POR_PIEZA
+        - comision_pesos - impuestos_sat_pesos - fondo_merma_pesos,
         2,
     )
 
@@ -318,10 +331,16 @@ def calcular_unit_economics_por_articulo(
 # ===========================================================================
 # 3. CAPA DE SANITIZACIÓN Y PERSISTENCIA EN SQLITE (ETL PIPELINE)
 # ===========================================================================
+def _agregar_columnas_faltantes(conn: sqlite3.Connection, tabla: str, esquema: Dict[str, str]) -> None:
+    existentes = [c[1] for c in conn.execute(f"PRAGMA table_info({tabla})").fetchall()]
+    for col, tipo in esquema.items():
+        if col not in existentes:
+            conn.execute(f"ALTER TABLE {tabla} ADD COLUMN {col} {tipo};")
+
+
 def asegurar_esquema_financiero(conn: sqlite3.Connection) -> None:
     """Verifica y crea las columnas requeridas en SQLite."""
-    cols_cand = [c[1] for c in conn.execute("PRAGMA table_info(zapatos_candidatos)").fetchall()]
-    esquema_cand: Dict[str, str] = {
+    _agregar_columnas_faltantes(conn, "zapatos_candidatos", {
         "sku_interno_ml": "TEXT DEFAULT ''",
         "genero": "TEXT DEFAULT 'Unisex'",
         "tipo_calzado": "TEXT DEFAULT 'Casual / Urbano'",
@@ -342,244 +361,176 @@ def asegurar_esquema_financiero(conn: sqlite3.Connection) -> None:
         "semaforo": "TEXT DEFAULT '⚠️ NO RECOMENDADO'",
         "motivo_diagnostico": "TEXT DEFAULT 'Pendiente de cálculo'",
         "apto_publicar": "INTEGER DEFAULT 0",
-    }
-    for col, tipo in esquema_cand.items():
-        if col not in cols_cand:
-            conn.execute(f"ALTER TABLE zapatos_candidatos ADD COLUMN {col} {tipo};")
-
-    cols_hist = [c[1] for c in conn.execute("PRAGMA table_info(historial_stock_21_dias)").fetchall()]
-    esquema_hist: Dict[str, str] = {
+    })
+    _agregar_columnas_faltantes(conn, "historial_stock_21_dias", {
         "talla_norm": "TEXT DEFAULT 'N/A'",
         "reserva_operativa": f"INTEGER DEFAULT {RESERVA_FIJA_POR_TALLA}",
         "stock_seguro_publicable": "INTEGER DEFAULT 0",
-    }
-    for col, tipo in esquema_hist.items():
-        if col not in cols_hist:
-            conn.execute(f"ALTER TABLE historial_stock_21_dias ADD COLUMN {col} {tipo};")
-
+    })
     conn.commit()
 
 
-def ejecutar_motor_financiero_y_sanitizacion() -> None:
-    """Ejecuta el ciclo ETL completo para Ropa y Calzado y muestra resumen en consola."""
-    print("=" * 75)
-    print("⚙️ EJECUTANDO PASO 5: MOTOR FINANCIERO HÍBRIDO (ROPA Y CALZADO)")
-    print("=" * 75)
+def _sanitizar_historial_tallas(
+    conn: sqlite3.Connection, df_hist: pd.DataFrame, mapa_es_ropa: Dict[str, bool]
+) -> pd.DataFrame:
+    """
+    FASE 1: normaliza tallas, aplica la reserva por talla y la guarda en SQLite.
+    Devuelve la última lectura de cada (SKU, talla normalizada).
+    """
+    if df_hist.empty:
+        return pd.DataFrame(
+            columns=["id_ps", "talla_norm", "stock_vallejo", "stock_seguro_publicable"]
+        )
 
-    if not RUTA_BD.exists():
-        print(f"❌ No se encontró la base de datos en {RUTA_BD}")
-        return
-
-    conn = sqlite3.connect(RUTA_BD, timeout=30)
-    asegurar_esquema_financiero(conn)
-
-    df_cand: pd.DataFrame = pd.read_sql_query("SELECT * FROM zapatos_candidatos", conn)
-    df_hist: pd.DataFrame = pd.read_sql_query("SELECT rowid, * FROM historial_stock_21_dias", conn)
-
-    if df_cand.empty:
-        print("⚠️ La tabla zapatos_candidatos está vacía.")
-        conn.close()
-        return
-
-    df_cand["id_ps"] = df_cand["id_ps"].fillna("").astype(str).str.strip()
-    df_cand["nombre_modelo"] = (
-        df_cand["nombre_modelo"].fillna("Modelo Sin Nombre").astype(str).str.strip()
+    df_hist["id_ps"] = df_hist["id_ps"].fillna("").astype(str).str.strip()
+    df_hist["talla"] = df_hist["talla"].fillna("N/A").astype(str).str.strip()
+    df_hist["stock_vallejo"] = (
+        pd.to_numeric(df_hist["stock_vallejo"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+        .astype(int)
     )
-    mapa_es_ropa: Dict[str, bool] = {
-        str(r["id_ps"]): es_prenda_textil(str(r["nombre_modelo"]))
-        for _, r in df_cand.iterrows()
-    }
+    df_hist["talla_norm"] = df_hist.apply(
+        lambda r: normalizar_talla_universal(r["talla"], mapa_es_ropa.get(str(r["id_ps"]), False)),
+        axis=1,
+    )
+    df_hist["reserva_operativa"] = RESERVA_FIJA_POR_TALLA
+    df_hist["stock_seguro_publicable"] = (
+        df_hist["stock_vallejo"] - RESERVA_FIJA_POR_TALLA
+    ).clip(lower=0).astype(int)
 
-    # -----------------------------------------------------------------------
-    # FASE 1: SANITIZACIÓN DEL HISTÓRICO DE TALLAS (ROPA + CALZADO)
-    # -----------------------------------------------------------------------
-    if not df_hist.empty:
-        df_hist["id_ps"] = df_hist["id_ps"].fillna("").astype(str).str.strip()
-        df_hist["talla"] = df_hist["talla"].fillna("N/A").astype(str).str.strip()
-        df_hist["stock_vallejo"] = (
-            pd.to_numeric(df_hist["stock_vallejo"], errors="coerce")
-            .fillna(0)
-            .clip(lower=0)
-            .astype(int)
-        )
-        df_hist["talla_norm"] = df_hist.apply(
-            lambda r: normalizar_talla_universal(r["talla"], mapa_es_ropa.get(str(r["id_ps"]), False)),
-            axis=1,
-        )
-        df_hist["reserva_operativa"] = RESERVA_FIJA_POR_TALLA
-        df_hist["stock_seguro_publicable"] = (
-            df_hist["stock_vallejo"] - RESERVA_FIJA_POR_TALLA
-        ).clip(lower=0).astype(int)
-
-        datos_update_hist = list(
+    conn.executemany(
+        """
+        UPDATE historial_stock_21_dias
+        SET talla_norm = ?,
+            reserva_operativa = ?,
+            stock_seguro_publicable = ?
+        WHERE rowid = ?
+        """,
+        list(
             zip(
                 df_hist["talla_norm"],
                 df_hist["reserva_operativa"],
                 df_hist["stock_seguro_publicable"],
                 df_hist["rowid"],
             )
-        )
-        conn.executemany(
-            """
-            UPDATE historial_stock_21_dias
-            SET talla_norm = ?,
-                reserva_operativa = ?,
-                stock_seguro_publicable = ?
-            WHERE rowid = ?
-            """,
-            datos_update_hist,
-        )
-
-        if "fecha" in df_hist.columns:
-            df_tallas_ult = (
-                df_hist.sort_values("fecha")
-                .drop_duplicates(subset=["id_ps", "talla_norm"], keep="last")
-                .copy()
-            )
-        else:
-            df_tallas_ult = df_hist.drop_duplicates(subset=["id_ps", "talla_norm"], keep="last").copy()
-    else:
-        df_tallas_ult = pd.DataFrame(
-            columns=["id_ps", "talla_norm", "stock_vallejo", "stock_seguro_publicable"]
-        )
-
-    stk_fisico_map: Dict[str, int] = (
-        df_tallas_ult.groupby("id_ps")["stock_vallejo"].sum().to_dict()
-        if not df_tallas_ult.empty
-        else {}
-    )
-    stk_publicable_map: Dict[str, int] = (
-        df_tallas_ult.groupby("id_ps")["stock_seguro_publicable"].sum().to_dict()
-        if not df_tallas_ult.empty
-        else {}
-    )
-    tallas_seguras_count_map: Dict[str, int] = (
-        df_tallas_ult[df_tallas_ult["stock_seguro_publicable"] > 0]
-        .groupby("id_ps")["talla_norm"]
-        .count()
-        .to_dict()
-        if not df_tallas_ult.empty
-        else {}
-    )
-    tallas_lista_map: Dict[str, List[str]] = (
-        df_tallas_ult.groupby("id_ps")["talla_norm"].apply(list).to_dict()
-        if not df_tallas_ult.empty
-        else {}
+        ),
     )
 
-    df_seguras_only = (
-        df_tallas_ult[df_tallas_ult["stock_seguro_publicable"] > 0].copy()
-        if not df_tallas_ult.empty
-        else pd.DataFrame()
-    )
-    if not df_seguras_only.empty:
-        df_seguras_only["etiqueta_t"] = (
-            df_seguras_only["talla_norm"].astype(str)
+    ordenado = df_hist.sort_values("fecha") if "fecha" in df_hist.columns else df_hist
+    return ordenado.drop_duplicates(subset=["id_ps", "talla_norm"], keep="last").copy()
+
+
+def _resumir_tallas_por_sku(df_tallas_ult: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    """Mapas por SKU: stock físico, stock publicable, tallas seguras, lista de tallas y detalle."""
+    if df_tallas_ult.empty:
+        return {"fisico": {}, "publicable": {}, "seguras": {}, "lista": {}, "detalle": {}}
+
+    por_sku = df_tallas_ult.groupby("id_ps")
+    df_seguras = df_tallas_ult[df_tallas_ult["stock_seguro_publicable"] > 0].copy()
+    detalle: Dict[str, str] = {}
+    if not df_seguras.empty:
+        df_seguras["etiqueta_t"] = (
+            df_seguras["talla_norm"].astype(str)
             + " ("
-            + df_seguras_only["stock_seguro_publicable"].astype(str)
+            + df_seguras["stock_seguro_publicable"].astype(str)
             + ")"
         )
-        detalle_tallas_map: Dict[str, str] = (
-            df_seguras_only.groupby("id_ps")["etiqueta_t"]
+        detalle = (
+            df_seguras.groupby("id_ps")["etiqueta_t"]
             .apply(lambda s: ", ".join(s.astype(str)))
             .to_dict()
         )
-    else:
-        detalle_tallas_map = {}
 
-    # -----------------------------------------------------------------------
-    # FASE 2: CÁLCULO DE UNIT ECONOMICS INTERNOS Y SEMÁFORO
-    # -----------------------------------------------------------------------
-    if "costo_socio" in df_cand.columns:
-        df_cand["costo_socio"] = (
-            pd.to_numeric(df_cand["costo_socio"], errors="coerce").fillna(0.0).clip(lower=0.0)
-        )
-    else:
-        df_cand["costo_socio"] = 0.0
+    return {
+        "fisico": por_sku["stock_vallejo"].sum().to_dict(),
+        "publicable": por_sku["stock_seguro_publicable"].sum().to_dict(),
+        "seguras": df_seguras.groupby("id_ps")["talla_norm"].count().to_dict(),
+        "lista": por_sku["talla_norm"].apply(list).to_dict(),
+        "detalle": detalle,
+    }
 
-    registros_actualizacion: List[tuple] = []
-    recomendados_totales: int = 0
-    con_costo_totales: int = 0
 
-    for _, row in df_cand.iterrows():
-        id_ps: str = str(row["id_ps"])
-        if not id_ps:
-            continue
+def _estado_fotos(id_ps: str) -> Tuple[int, int, str]:
+    """Cuenta las láminas HD del SKU. Devuelve (conteo, fotos_ok, texto de estado)."""
+    carpeta_sku = DIR_CATALOGO / id_ps
+    conteo_fotos: int = sum(1 for nombre in ARCHIVOS_LAMINAS if (carpeta_sku / nombre).exists())
+    fotos_ok: int = 1 if conteo_fotos == len(ARCHIVOS_LAMINAS) else 0
+    return conteo_fotos, fotos_ok, f"{conteo_fotos}/4 {'✅' if fotos_ok else '❌'}"
 
-        nombre: str = str(row["nombre_modelo"])
-        costo: float = float(row["costo_socio"])
-        if costo > 0:
-            con_costo_totales += 1
 
-        stock_fisico: int = int(stk_fisico_map.get(id_ps, 0))
-        stock_publicable: int = int(stk_publicable_map.get(id_ps, 0))
-        n_tallas_seguras: int = int(tallas_seguras_count_map.get(id_ps, 0))
-        detalle_tallas: str = detalle_tallas_map.get(id_ps, "Sin tallas > 6 pzas")
-
-        lista_t = tallas_lista_map.get(id_ps, [])
-        genero, categoria, color = clasificar_atributos_catalogo(nombre, lista_t)
-
-        fin = calcular_unit_economics_por_articulo(costo, categoria)
-
-        carpeta_sku = DIR_CATALOGO / id_ps
-        archivos_fotos = [
-            carpeta_sku / "01_portada_blanca.jpg",
-            carpeta_sku / "02_angulo_galeria.jpg",
-            carpeta_sku / "03_ficha_beneficios.jpg",
-            carpeta_sku / "04_guia_tallas_cm.jpg",
-        ]
-        conteo_fotos: int = sum(1 for ruta_f in archivos_fotos if ruta_f.exists())
-        fotos_ok: int = 1 if conteo_fotos == 4 else 0
-        fotos_status: str = f"{conteo_fotos}/4 {'✅' if fotos_ok else '❌'}"
-
-        motivos_rechazo: List[str] = []
-        if costo <= 0.0:
-            motivos_rechazo.append("Costo socio no registrado")
-        if not fotos_ok:
-            motivos_rechazo.append(f"Faltan fotos HD ({conteo_fotos}/4)")
-        if n_tallas_seguras < MIN_TALLAS_SEGURAS_REQUERIDAS or stock_publicable < MIN_PARES_PUBLICABLES_MODELO:
-            motivos_rechazo.append(
-                f"Stock insuficiente tras reserva de {RESERVA_FIJA_POR_TALLA} pzas "
-                f"({n_tallas_seguras} tallas / {stock_publicable} pzas libres)"
-            )
-
-        if not motivos_rechazo:
-            semaforo = "✅ RECOMENDADO"
-            motivo_txt = (
-                f"Óptimo ({categoria}): {n_tallas_seguras} tallas seguras ({stock_publicable} pzas), "
-                f"4/4 fotos HD y ganancia limpia de ${fin['utilidad_neta_ml']:,.2f}/unidad."
-            )
-            recomendados_totales += 1
-        else:
-            semaforo = "⚠️ NO RECOMENDADO"
-            motivo_txt = " · ".join(motivos_rechazo)
-
-        registros_actualizacion.append(
-            (
-                f"PS-{id_ps}",
-                genero,
-                categoria,
-                color,
-                stock_fisico,
-                n_tallas_seguras,
-                stock_publicable,
-                detalle_tallas,
-                fin["precio_piso_ml"],
-                fin["precio_ml"],
-                fin["envio_ml_pesos"],
-                fin["comision_ml_pesos"],
-                fin["impuestos_sat_pesos"],
-                fin["fondo_merma_ml"],
-                fin["utilidad_neta_ml"],
-                fin["iva_a_favor_ml"],
-                fotos_ok,
-                fotos_status,
-                semaforo,
-                motivo_txt,
-                id_ps,
-            )
+def _diagnosticar_sku(
+    costo: float,
+    conteo_fotos: int,
+    fotos_ok: int,
+    n_tallas_seguras: int,
+    stock_publicable: int,
+    categoria: str,
+    utilidad_neta: float,
+) -> Tuple[str, str]:
+    """Semáforo de publicación y su motivo."""
+    motivos_rechazo: List[str] = []
+    if costo <= 0.0:
+        motivos_rechazo.append("Costo socio no registrado")
+    if not fotos_ok:
+        motivos_rechazo.append(f"Faltan fotos HD ({conteo_fotos}/4)")
+    if n_tallas_seguras < MIN_TALLAS_SEGURAS_REQUERIDAS or stock_publicable < MIN_PARES_PUBLICABLES_MODELO:
+        motivos_rechazo.append(
+            f"Stock insuficiente tras reserva de {RESERVA_FIJA_POR_TALLA} pzas "
+            f"({n_tallas_seguras} tallas / {stock_publicable} pzas libres)"
         )
 
+    if motivos_rechazo:
+        return SEMAFORO_NO_RECOMENDADO, " · ".join(motivos_rechazo)
+    return SEMAFORO_RECOMENDADO, (
+        f"Óptimo ({categoria}): {n_tallas_seguras} tallas seguras ({stock_publicable} pzas), "
+        f"4/4 fotos HD y ganancia limpia de ${utilidad_neta:,.2f}/unidad."
+    )
+
+
+def _calcular_registro_sku(id_ps: str, nombre: str, costo: float, resumen: Dict[str, Dict[str, Any]]) -> tuple:
+    """FASE 2 para un SKU: atributos, unit economics, fotos y semáforo (fila lista para el UPDATE)."""
+    stock_fisico: int = int(resumen["fisico"].get(id_ps, 0))
+    stock_publicable: int = int(resumen["publicable"].get(id_ps, 0))
+    n_tallas_seguras: int = int(resumen["seguras"].get(id_ps, 0))
+    detalle_tallas: str = resumen["detalle"].get(id_ps, "Sin tallas > 6 pzas")
+
+    genero, categoria, color = clasificar_atributos_catalogo(nombre, resumen["lista"].get(id_ps, []))
+    fin = calcular_unit_economics_por_articulo(costo, categoria)
+    conteo_fotos, fotos_ok, fotos_status = _estado_fotos(id_ps)
+    semaforo, motivo_txt = _diagnosticar_sku(
+        costo, conteo_fotos, fotos_ok, n_tallas_seguras, stock_publicable, categoria, fin["utilidad_neta_ml"]
+    )
+
+    return (
+        f"PS-{id_ps}",
+        genero,
+        categoria,
+        color,
+        stock_fisico,
+        n_tallas_seguras,
+        stock_publicable,
+        detalle_tallas,
+        fin["precio_piso_ml"],
+        fin["precio_ml"],
+        fin["envio_ml_pesos"],
+        fin["comision_ml_pesos"],
+        fin["impuestos_sat_pesos"],
+        fin["fondo_merma_ml"],
+        fin["utilidad_neta_ml"],
+        fin["iva_a_favor_ml"],
+        fotos_ok,
+        fotos_status,
+        semaforo,
+        motivo_txt,
+        id_ps,
+    )
+
+
+POSICION_SEMAFORO: int = 18  # índice del semáforo dentro de la fila de _calcular_registro_sku
+
+
+def _guardar_registros(conn: sqlite3.Connection, registros: List[tuple]) -> None:
     conn.executemany(
         """
         UPDATE zapatos_candidatos
@@ -605,12 +556,68 @@ def ejecutar_motor_financiero_y_sanitizacion() -> None:
             motivo_diagnostico = ?
         WHERE CAST(id_ps AS TEXT) = ?
         """,
-        registros_actualizacion,
+        registros,
     )
-
     conn.commit()
+
+
+def _sanitizar_candidatos(df_cand: pd.DataFrame) -> pd.DataFrame:
+    df_cand["id_ps"] = df_cand["id_ps"].fillna("").astype(str).str.strip()
+    df_cand["nombre_modelo"] = (
+        df_cand["nombre_modelo"].fillna("Modelo Sin Nombre").astype(str).str.strip()
+    )
+    if "costo_socio" in df_cand.columns:
+        df_cand["costo_socio"] = (
+            pd.to_numeric(df_cand["costo_socio"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        )
+    else:
+        df_cand["costo_socio"] = 0.0
+    return df_cand
+
+
+def ejecutar_motor_financiero_y_sanitizacion() -> None:
+    """Ejecuta el ciclo ETL completo para Ropa y Calzado y muestra resumen en consola."""
+    print("=" * 75)
+    print("⚙️ EJECUTANDO PASO 5: MOTOR FINANCIERO HÍBRIDO (ROPA Y CALZADO)")
+    print("=" * 75)
+
+    if not RUTA_BD.exists():
+        print(f"❌ No se encontró la base de datos en {RUTA_BD}")
+        return
+
+    conn = sqlite3.connect(RUTA_BD, timeout=30)
+    asegurar_esquema_financiero(conn)
+
+    df_cand: pd.DataFrame = pd.read_sql_query("SELECT * FROM zapatos_candidatos", conn)
+    df_hist: pd.DataFrame = pd.read_sql_query("SELECT rowid, * FROM historial_stock_21_dias", conn)
+
+    if df_cand.empty:
+        print("⚠️ La tabla zapatos_candidatos está vacía.")
+        conn.close()
+        return
+
+    df_cand = _sanitizar_candidatos(df_cand)
+    mapa_es_ropa: Dict[str, bool] = {
+        id_ps: es_prenda_textil(nombre)
+        for id_ps, nombre in zip(df_cand["id_ps"], df_cand["nombre_modelo"])
+    }
+
+    # FASE 1: sanitización del histórico de tallas (ropa + calzado)
+    resumen = _resumir_tallas_por_sku(_sanitizar_historial_tallas(conn, df_hist, mapa_es_ropa))
+
+    # FASE 2: unit economics internos y semáforo
+    df_validos = df_cand[df_cand["id_ps"] != ""]
+    registros_actualizacion: List[tuple] = [
+        _calcular_registro_sku(str(id_ps), str(nombre), float(costo), resumen)
+        for id_ps, nombre, costo in zip(df_validos["id_ps"], df_validos["nombre_modelo"], df_validos["costo_socio"])
+    ]
+    _guardar_registros(conn, registros_actualizacion)
     conn.close()
 
+    con_costo_totales: int = int((df_validos["costo_socio"] > 0).sum())
+    recomendados_totales: int = sum(
+        1 for registro in registros_actualizacion if registro[POSICION_SEMAFORO] == SEMAFORO_RECOMENDADO
+    )
     print(f"✅ Catálogo total en BD procesado : {len(registros_actualizacion):,} SKUs")
     print(f"💰 Artículos con Costo Auditado   : {con_costo_totales:,} SKUs")
     print(f"🚀 Artículos ✅ RECOMENDADOS       : {recomendados_totales:,} SKUs")

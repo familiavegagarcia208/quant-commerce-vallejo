@@ -1,1173 +1,936 @@
 # -*- coding: utf-8 -*-
 """
 ========================================================================================
-ZAPATERÍA VALLEJO - PANEL DE CONTROL QUANT-COMMERCE, TOP 100 MELI 24H & ESTUDIO HD
-========================================================================================
-- Conectado directamente a `cargar_estado_completo_bd` de `motor_etl_vallejo.py`
-  (lee `zapatos_candidatos` [8,165], `historial_stock_21_dias` [2,745] e
-  `historial_inventario` -> 931 SKUs auditados reales y Top 100 MeLi).
-- Detecta automáticamente las láminas existentes en `data/catalogo_listo/` y
-  `output/catalogo_listo/`.
+PASO 4: PANEL DE CONTROL E INVENTARIO EN STREAMLIT (v2 · Matriz Maslow + Multi-Tienda)
 ========================================================================================
 """
 
 from __future__ import annotations
 
-import hashlib
-import io
-import json
-import subprocess
-import sys
-import zipfile
+from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import re
+import sqlite3
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
 
-from motor_etl_vallejo import (
-    Config,
-    DBHandler,
-    EstudioFotograficoSinergia,
-    ExtractorAsyncSinergia,
-    ResultadoExtraccion,
-    VarianteSucursal,
-    cargar_estado_completo_bd,
-    clasificar_catalogo_origen,
-    col_int,
-    col_num,
-    col_txt,
-    configurar_loggers,
-    es_marca_restringida_meli,
-    evaluar_dataframe_quant,
-    extraer_marca_real,
-    generar_cola_sincronizacion_ml,
-    sanitizar_sku,
-    seleccionar_lote_doble_carril,
-    validar_imagen_bytes,
-)
+import exportar_mercadolibre as exp_ml
+import inventario_tiendas as inv
+import paso5_motor_financiero as finanzas
 
-# ==============================================================================
-# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS
-# ==============================================================================
 st.set_page_config(
-    page_title="Zapatería Vallejo · Laboratorio ETL, Lanzador MeLi & Estudio HD",
-    page_icon="📊",
+    page_title="Zapatería Vallejo · Control e Inventario",
+    page_icon="👟",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-        .block-container { padding-top: 1.0rem; padding-bottom: 2rem; }
-        div[data-testid="stMetric"] {
-            background-color: #0F172A;
-            border: 1px solid #1E293B;
-            border-left: 5px solid #10B981;
-            padding: 12px 14px;
-            border-radius: 10px;
-            color: #F8FAFC;
-        }
-        div[data-testid="stMetricLabel"] > div { color: #94A3B8 !important; font-weight: 600; }
-        div[data-testid="stMetricValue"] > div { color: #F8FAFC !important; font-size: 1.45rem !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
+# ----------------------------------------------------------------------------------
+# CONFIGURACIÓN
+# ----------------------------------------------------------------------------------
+RUTA_BD: Path = Path("data/zapateria_vallejo.db")
+DIR_CATALOGO_LISTO: Path = Path("data/catalogo_listo")
+DIR_DATA: Path = Path("data")
+
+SIN_CATALOGO = "Sin Catálogo (Web)"
+RECOMENDADO = "✅ RECOMENDADO"
+NO_RECOMENDADO = "⚠️ NO RECOMENDADO"
+
+FOTOS_REQUERIDAS = 4
+STOCK_MIN_DEFAULT = 5
+GANANCIA_MIN_DEFAULT = 100.0
+
+TABLAS_FINANCIERAS = (
+    "matriz_financiera",
+    "auditoria_financiera",
+    "catalogo_financiero",
+    "productos_auditados",
+    "unit_economics",
 )
 
-CARPETAS_ESTUDIO: Tuple[Path, ...] = (
-    Path("data/catalogo_listo"),
-    Path("output/catalogo_listo"),
-)
-
-ETIQUETAS_LAMINAS: Dict[str, str] = {
-    "01_portada_blanca": "1. Portada Blanca (Crop 95%)",
-    "02_vista_angulo": "2. Vista en Ángulo / Galería",
-    "98_lamina_impacto": "3. Lámina 98 · Impacto Comercial",
-    "99_lamina_ficha": "4. Lámina 99 · Guía de Tallas y Ficha",
+ALIAS: Dict[str, List[str]] = {
+    "id": ["ID Price Shoes", "id_ps", "id", "sku"],
+    "sku": ["SKU Interno", "sku_interno", "sku_interno_ml"],
+    "modelo": ["Modelo", "nombre_modelo", "nombre"],
+    "enlace": ["Enlace Original", "url_real", "url"],
+    "costo": ["Costo ($)", "costo_socio", "costo"],
+    "stock": ["Stock Publicable", "stock_publicable", "stock_publicable_total", "stock_total_anterior", "stock"],
+    "precio": ["Precio Sugerido", "precio_sugerido", "precio_ml", "precio_venta"],
+    "ganancia": ["Ganancia Neta", "ganancia_neta", "utilidad_neta_ml", "utilidad_neta"],
+    "catalogo": ["Catálogo", "origen_catalogo"],
+    "subir": ["Subir a ML", "subir_ml"],
 }
 
-VARIANTES_ARCHIVO_LAMINA: Dict[str, Tuple[str, ...]] = {
-    "01_portada_blanca": (
-        "SINERGIA_{sku}_01_portada_blanca.png",
-        "01_portada_blanca.png",
-        "01_portada_blanca.jpg",
-        "01.png",
-        "01.jpg",
-    ),
-    "02_vista_angulo": (
-        "SINERGIA_{sku}_02_vista_angulo.png",
-        "02_vista_angulo.png",
-        "02_vista_catalogo_1.png",
-        "02_angulo_galeria.jpg",
-        "02.png",
-        "02.jpg",
-    ),
-    "98_lamina_impacto": (
-        "SINERGIA_{sku}_98_lamina_impacto.png",
-        "98_lamina_impacto.png",
-        "98_lamina_collage_vistas.png",
-        "03_ficha_beneficios.jpg",
-        "03.png",
-        "03.jpg",
-    ),
-    "99_lamina_ficha": (
-        "SINERGIA_{sku}_99_lamina_ficha.png",
-        "99_lamina_ficha.png",
-        "99_lamina_ficha_oficial.png",
-        "04_guia_tallas_cm.jpg",
-        "04.png",
-        "04.jpg",
-    ),
+NOMBRES_CATALOGOS: Dict[str, str] = {
+    "1342200": "1342200 - Caballeros",
+    "1345253": "1345253 - Botas",
+    "1346256": "1346256 - Urbano",
+    "1346284": "1346284 - Vestir Casual",
+    "1348733": "1348733 - Abrigador",
+    "1348737": "1348737 - Vestir",
+    "1348749": "1348749 - NBA",
+    "1348753": "1348753 - NFL",
+    "1348757": "1348757 - Man",
+    "1348779": "1348779 - Accesorios",
+    "1348783": "1348783 - Kids",
+    "1348800": "1348800 - Licencias",
+    "1348804": "1348804 - Pijamas",
+    "1352311": "1352311 - Seven Jeans",
+    "1353556": "1353556 - Calzado y Accesorios",
+    "1353557": "1353557 - Juvenil",
+    "1353843": "1353843 - Confort",
+    "1368789": "1368789 - Sandalias",
+    "1368800": "1368800 - Prokennex Mini",
+    "1368804": "1368804 - Pop Universe Mini",
+    "1368805": "1368805 - Urban Lifestyle Mini",
+    "1370231": "1370231 - Escolar",
+    "1376435": "1376435 - Todo en Uno",
+    "1377702": "1377702 - Exclusivos",
+    "1378033": "1378033 - Kids Todo en Uno",
+    "1380328": "1380328 - Botas Largas",
+    "1380332": "1380332 - Goodyear Botas",
+    "1380337": "1380337 - Coleccion Thalia",
+    "1380341": "1380341 - Belinda Fashion & Chic",
+    "1380346": "1380346 - Navidad",
+    "1380350": "1380350 - Navidad Home",
+    "1380354": "1380354 - Reebok Impulsados",
+    "1380358": "1380358 - Importados Fall Ofertas",
+    "1380359": "1380359 - Botas Kits",
+    "1380363": "1380363 - Basicos Botines",
+    "1380367": "1380367 - Botas Texano",
+    "1380516": "1380516 - Oportunidades Urbano",
+    "1380996": "1380996 - Love to Lounge",
+    "1381316": "1381316 - Med Chef",
+    "1381338": "1381338 - Jeans",
+    "1381342": "1381342 - Ella",
+    "1381346": "1381346 - Basicos OID6",
+    "1381350": "1381350 - Mushu Esenciales Home",
+    "1381556": "1381556 - Navidad Kids",
 }
 
-defaults_sesion: Dict[str, Any] = {
-    "meta_publicacion_meli": 100,
-    "limite_baja_stock": Config.LIMITE_CRITICO_BAJA,
-    "lecturas_gracia_ucb": Config.LECTURAS_GRACIA_UCB,
-    "dias_max_estancamiento": Config.DIAS_MAX_ESTANCAMIENTO,
-    "pendiente_decay_lambda": Config.PENDIENTE_DECAY_PELIGROSA,
-    "factor_incertidumbre_ucb": Config.FACTOR_UCB_C,
-    "media_bayesiana_min": Config.MEDIA_BAYESIANA_MIN,
-    "comision_meli_pct": Config.COMISION_MELI_PCT,
-    "costo_envio_mxn": Config.COSTO_ENVIO_MXN,
-    "margen_objetivo_pct": Config.MARGEN_OBJETIVO_PCT,
-    "buffer_seguridad": Config.BUFFER_STOCK,
-    "usar_costo_estimado": False,
-    "costo_estimado_default": 380.0,
-    "marcas_bloqueadas_custom": list(Config.MARCAS_RESTRINGIDAS_MELI),
-    "ultimo_log_cmd": "",
-}
-for k_def, v_def in defaults_sesion.items():
-    if k_def not in st.session_state:
-        st.session_state[k_def] = v_def
+ETIQUETAS_LAMINAS = ["Portada Blanca", "Ángulo de Detalle", "Ficha de Beneficios", "Guía de Tallas (CM)"]
+
+ORIGEN_PDF = "📘 Solo catálogos PDF"
+ORIGEN_TODO = "🌐 Todo (incluye Web)"
+ORIGEN_WEB = "🕸️ Solo Web / sin catálogo"
+
+ORDEN_DEFAULT = "Recomendados primero + mayor ganancia"
+OPCIONES_ORDEN = [
+    ORDEN_DEFAULT,
+    "Ganancia Neta",
+    "Margen (%)",
+    "Precio Sugerido",
+    "Costo ($)",
+    "Stock Publicable",
+    "Sobreprecio vs PS (%)",
+    "Ganancia directa ($)",
+    "ID Price Shoes",
+    "Modelo",
+]
+
+FILTRO_KEYS = [
+    "f_etapa", "f_cuadrante", "f_origen", "f_catalogos", "f_semaforo", "f_busqueda",
+    "f_costo", "f_precio", "f_ganancia", "f_margen", "f_stock", "f_fotos", "f_orden",
+    "f_asc", "f_tipos", "f_inventario",
+]
 
 
-# ==============================================================================
-# 2. LOCALIZADOR DE LÁMINAS EN `data/catalogo_listo` Y `output/catalogo_listo`
-# ==============================================================================
-def resolver_rutas_laminas_sku(sku: str) -> Dict[str, Optional[Path]]:
-    s = sanitizar_sku(sku)
-    encontradas: Dict[str, Optional[Path]] = {t: None for t in Config.TIPOS_ACTIVO}
-    if not s:
-        return encontradas
-
-    for tipo, patrones in VARIANTES_ARCHIVO_LAMINA.items():
-        for base_dir in CARPETAS_ESTUDIO:
-            carpeta_sku = base_dir / s
-            if not carpeta_sku.exists():
-                continue
-            for pat in patrones:
-                cand = carpeta_sku / pat.format(sku=s)
-                if cand.exists() and cand.stat().st_size > 512:
-                    encontradas[tipo] = cand
-                    break
-            if encontradas[tipo] is not None:
-                break
-    return encontradas
+# ----------------------------------------------------------------------------------
+# UTILIDADES
+# ----------------------------------------------------------------------------------
+def formatear_nombre_catalogo(valor_origen: Any) -> str:
+    if not valor_origen:
+        return SIN_CATALOGO
+    texto = str(valor_origen).strip()
+    if not texto or texto.lower() in ("none", "nan", "null"):
+        return SIN_CATALOGO
+    m = re.search(r"(\d{7})", texto)
+    if m and m.group(1) in NOMBRES_CATALOGOS:
+        return NOMBRES_CATALOGOS[m.group(1)]
+    limpio = texto.replace(".pdf", "").replace(".PDF", "").strip()
+    return NOMBRES_CATALOGOS.get(limpio, texto)
 
 
-def contar_laminas_listas_sku(sku: str) -> int:
-    rutas = resolver_rutas_laminas_sku(sku)
-    return sum(1 for r in rutas.values() if r is not None)
+def limpiar_id(valor: Any) -> str:
+    s = str(valor).strip().replace("PS-", "")
+    return s.lstrip("0") or s
 
 
-def listar_skus_con_laminas_en_disco() -> List[str]:
-    skus: List[str] = []
-    for base_dir in CARPETAS_ESTUDIO:
-        if not base_dir.exists():
+def claves_id(valor: Any) -> Set[str]:
+    s = str(valor).strip()
+    limpio = limpiar_id(s)
+    return {s, limpio, f"PS-{limpio}"}
+
+
+def calcular_precio_y_ganancia_fallback(costo: float, modelo: str = "") -> Tuple[float, float]:
+    if costo <= 0:
+        return 0.0, 0.0
+    _genero, categoria, _color = finanzas.clasificar_atributos_catalogo(str(modelo), [])
+    economia = finanzas.calcular_unit_economics_por_articulo(float(costo), categoria)
+    return economia["precio_ml"], economia["utilidad_neta_ml"]
+
+
+def firma_fuentes() -> Tuple[float, ...]:
+    rutas: List[Path] = [RUTA_BD, DIR_CATALOGO_LISTO]
+    if DIR_DATA.exists():
+        rutas += list(DIR_DATA.glob("*.csv"))
+    if DIR_CATALOGO_LISTO.exists():
+        rutas += [c for c in DIR_CATALOGO_LISTO.iterdir() if c.is_dir()]
+    return tuple(p.stat().st_mtime for p in rutas if p.exists())
+
+
+def _col(df: pd.DataFrame, campo: str) -> Optional[str]:
+    minusculas = {c.lower(): c for c in df.columns}
+    for alias in ALIAS[campo]:
+        if alias.lower() in minusculas:
+            return minusculas[alias.lower()]
+    return None
+
+
+def _texto(df: pd.DataFrame, campo: str, default: Any = "") -> pd.Series:
+    c = _col(df, campo)
+    if c is None:
+        return pd.Series(default, index=df.index, dtype="object")
+    return df[c].fillna("").astype(str).str.strip()
+
+
+def _num(df: pd.DataFrame, campo: str, default: Any = 0.0) -> pd.Series:
+    c = _col(df, campo)
+    if c is None:
+        return default if isinstance(default, pd.Series) else pd.Series(float(default), index=df.index)
+    limpio = df[c].astype(str).str.replace(r"[$,\s]", "", regex=True)
+    return pd.to_numeric(limpio, errors="coerce").fillna(default)
+
+
+# ----------------------------------------------------------------------------------
+# CARGA DE DATOS (con caché)
+# ----------------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def indexar_carpetas_fotos(firma: Tuple[float, ...]) -> Dict[str, List[Path]]:
+    mapa: Dict[str, List[Path]] = {}
+    if not DIR_CATALOGO_LISTO.exists():
+        return mapa
+
+    for carpeta in DIR_CATALOGO_LISTO.iterdir():
+        if not carpeta.is_dir():
             continue
-        for d in sorted(base_dir.iterdir()):
-            if d.is_dir() and (any(d.glob("*.png")) or any(d.glob("*.jpg"))):
-                s_clean = sanitizar_sku(d.name)
-                if s_clean and s_clean not in skus:
-                    skus.append(s_clean)
-    return skus
+        m = re.search(r"(\d{5,8})", carpeta.name)
+        id_carpeta = m.group(1) if m else carpeta.name
+
+        laminas: List[Path] = []
+        for prefijo in ("01", "02", "03", "04"):
+            candidatas = sorted(carpeta.glob(f"{prefijo}*.jpg")) + sorted(carpeta.glob(f"{prefijo}*.png"))
+            if candidatas:
+                laminas.append(candidatas[0])
+
+        if laminas:
+            for k in claves_id(id_carpeta):
+                mapa[k] = laminas
+    return mapa
 
 
-def generar_placeholder_estudio(sku: str, tipo_activo: str, modelo: str = "") -> bytes:
-    img = Image.new("RGB", (800, 800), (15, 23, 42))
-    dr = ImageDraw.Draw(img)
-    dr.rounded_rectangle(
-        [(32, 32), (768, 768)],
-        radius=28,
-        fill=(30, 41, 59),
-        outline=(16, 185, 129),
-        width=3,
-    )
-    f_b = ImageFont.load_default()
-    dr.text(
-        (75, 290),
-        "ESTUDIO FOTOGRÁFICO HD (1200x1200px)",
-        fill=(16, 185, 129),
-        font=f_b,
-    )
-    dr.text((75, 340), f"ID Catálogo: {sku}", fill=(248, 250, 252), font=f_b)
-    if modelo:
-        dr.text((75, 375), f"Modelo: {modelo[:48]}", fill=(203, 213, 225), font=f_b)
-    dr.text(
-        (75, 420),
-        f"Lámina: {ETIQUETAS_LAMINAS.get(tipo_activo, tipo_activo)}",
-        fill=(245, 158, 11),
-        font=f_b,
-    )
-    dr.text(
-        (75, 475),
-        "Presiona 'Renderizar 4 Láminas HD' para generarla.",
-        fill=(148, 163, 184),
-        font=f_b,
-    )
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+PALABRAS_CSV_FINANCIERO = ("financ", "matriz", "audit", "catalogo", "ml")
 
 
-def empaquetar_zip_4_laminas(sku: str) -> Optional[bytes]:
-    rutas = resolver_rutas_laminas_sku(sku)
-    existentes = [r for r in rutas.values() if r is not None and r.exists()]
-    if not existentes:
+def _leer_mapa_origen(conn: sqlite3.Connection, tablas: Set[str]) -> Dict[str, str]:
+    mapa_origen: Dict[str, str] = {}
+    if "zapatos_candidatos" not in tablas:
+        return mapa_origen
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(zapatos_candidatos)")}
+    if "origen_catalogo" not in cols:
+        return mapa_origen
+    for id_p, orig in conn.execute("SELECT id_ps, COALESCE(origen_catalogo, '') FROM zapatos_candidatos"):
+        nombre = formatear_nombre_catalogo(orig)
+        for k in claves_id(id_p):
+            mapa_origen[k] = nombre
+    return mapa_origen
+
+
+def _leer_tabla_no_vacia(conn: sqlite3.Connection, tabla: str) -> Optional[pd.DataFrame]:
+    try:
+        df_tmp = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
+    except Exception:
         return None
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for r in existentes:
-            zf.write(r, arcname=r.name)
-    return buf.getvalue()
+    return None if df_tmp.empty else df_tmp
 
 
-def renderizar_4_laminas_en_vivo(
-    sku: str,
-    titulo: str,
-    marca: str,
-    categoria: str,
-    color: str,
-    material: str,
-    costo_base: float,
-    catalogo_origen: str,
-    stock_actual: int,
-    df_variantes_sku: pd.DataFrame,
-) -> Tuple[bool, str]:
-    sku_limpio = sanitizar_sku(sku)
-    if not sku_limpio:
-        return False, "ID inválido."
+def _leer_tabla_base(conn: sqlite3.Connection, tablas: Set[str]) -> Optional[pd.DataFrame]:
+    for tabla in TABLAS_FINANCIERAS:
+        df_tmp = _leer_tabla_no_vacia(conn, tabla) if tabla in tablas else None
+        if df_tmp is not None:
+            return df_tmp
 
-    log_pub, log_int = configurar_loggers()
-    estudio = EstudioFotograficoSinergia(log_pub, log_int)
+    if "zapatos_candidatos" in tablas:
+        df_tmp = pd.read_sql_query("SELECT * FROM zapatos_candidatos", conn)
+        if not df_tmp.empty:
+            return df_tmp
+    return None
 
-    imgs: List[Tuple[str, bytes]] = []
-    # 1. Buscar si ya tiene portada/ángulo en `data/catalogo_listo/{sku}` o en caché
-    rutas_existentes = resolver_rutas_laminas_sku(sku_limpio)
-    for k_base in ("01_portada_blanca", "02_vista_angulo"):
-        r_ex = rutas_existentes.get(k_base)
-        if r_ex is not None and r_ex.exists():
-            raw_b = r_ex.read_bytes()
-            if validar_imagen_bytes(raw_b):
-                imgs.append((hashlib.sha256(raw_b).hexdigest(), raw_b))
 
-    for r_raw in Config.rutas_cache_raw_sku(sku_limpio):
-        if len(imgs) >= 2:
-            break
-        if r_raw.exists() and r_raw.stat().st_size > 1024:
-            raw_b = r_raw.read_bytes()
-            if validar_imagen_bytes(raw_b):
-                imgs.append((hashlib.sha256(raw_b).hexdigest(), raw_b))
+def _leer_csv_utilizable(csv_path: Path) -> Optional[pd.DataFrame]:
+    if not any(k in csv_path.name.lower() for k in PALABRAS_CSV_FINANCIERO):
+        return None
+    try:
+        df_csv = pd.read_csv(csv_path)
+    except Exception:
+        return None
+    return None if (df_csv.empty or len(df_csv.columns) < 5) else df_csv
 
-    if len(imgs) == 1:
-        imgs = [imgs[0], imgs[0]]
-    elif len(imgs) < 1:
-        imgs = ExtractorAsyncSinergia._generar_siluetas_estudio_hd(
-            sku_limpio, categoria or "Calzado"
+
+def _elegir_base_con_csv(df_base: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    if not DIR_DATA.exists():
+        return df_base
+    for csv_path in sorted(DIR_DATA.glob("*.csv")):
+        df_csv = _leer_csv_utilizable(csv_path)
+        if df_csv is not None and (df_base is None or _col(df_csv, "precio") is not None):
+            return df_csv
+    return df_base
+
+
+def leer_fuentes() -> Tuple[Optional[pd.DataFrame], Dict[str, str]]:
+    mapa_origen: Dict[str, str] = {}
+    df_base: Optional[pd.DataFrame] = None
+
+    if RUTA_BD.exists():
+        with closing(sqlite3.connect(RUTA_BD)) as conn:
+            tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            mapa_origen = _leer_mapa_origen(conn, tablas)
+            df_base = _leer_tabla_base(conn, tablas)
+
+    return _elegir_base_con_csv(df_base), mapa_origen
+
+
+VALORES_SUBIR_VERDADEROS = ["true", "1", "si", "sí", "x", "yes"]
+
+
+def _serie_subir(df: pd.DataFrame) -> pd.Series:
+    col_subir = _col(df, "subir")
+    if not col_subir:
+        return pd.Series(pd.NA, index=df.index, dtype="boolean")
+    marcados = df[col_subir].astype(str).str.strip().str.lower().isin(VALORES_SUBIR_VERDADEROS)
+    return marcados.astype("boolean")
+
+
+def _precio_y_ganancia(df: pd.DataFrame, costo: pd.Series, modelo: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    pares = [calcular_precio_y_ganancia_fallback(c, m) for c, m in zip(costo, modelo)]
+    precio_fb = pd.Series([p for p, _ in pares], index=df.index)
+    ganancia_fb = pd.Series([g for _, g in pares], index=df.index)
+    return _num(df, "precio", precio_fb), _num(df, "ganancia", ganancia_fb)
+
+
+def _armar_inventario(
+    df: pd.DataFrame, raw_id: pd.Series, id_limpio: pd.Series, num_fotos: pd.Series, costo: pd.Series,
+    mapa_origen: Dict[str, str],
+) -> pd.DataFrame:
+    modelo = _texto(df, "modelo")
+    modelo = modelo.where(modelo != "", "Modelo " + id_limpio)
+
+    precio, ganancia = _precio_y_ganancia(df, costo, modelo)
+    stock = _num(df, "stock", 0).astype(int).clip(lower=0)
+
+    sku = _texto(df, "sku")
+    sku = pd.Series(["PS-" + i if not s.startswith("PS-") else s for s, i in zip(sku, id_limpio)], index=df.index)
+
+    origen_raw = _texto(df, "catalogo")
+    catalogo = pd.Series(
+        [mapa_origen.get(i) or mapa_origen.get(r) or formatear_nombre_catalogo(o)
+         for i, r, o in zip(id_limpio, raw_id, origen_raw)],
+        index=df.index,
+    )
+
+    return pd.DataFrame(
+        {
+            "ID Price Shoes": id_limpio,
+            "SKU Interno": sku,
+            "Catálogo": catalogo,
+            "Modelo": modelo,
+            "Enlace Original": _texto(df, "enlace"),
+            "Costo ($)": costo.round(2),
+            "Precio Sugerido": precio.round(2),
+            "Ganancia Neta": ganancia.round(2),
+            "Margen (%)": np.where(precio > 0, ganancia / precio * 100, 0.0).round(1),
+            "Stock Publicable": stock,
+            "_num_fotos": num_fotos,
+            "_subir_src": _serie_subir(df),
+        }
+    )
+
+
+@st.cache_data(show_spinner="Cargando inventario…")
+def cargar_datos_inventario(firma: Tuple[float, ...]) -> pd.DataFrame:
+    df_base, mapa_origen = leer_fuentes()
+    if df_base is None or df_base.empty:
+        return pd.DataFrame()
+
+    mapa_fotos = indexar_carpetas_fotos(firma)
+    df = df_base.reset_index(drop=True)
+
+    raw_id = _texto(df, "id")
+    id_limpio = raw_id.str.replace("PS-", "", regex=False).str.lstrip("0")
+    id_limpio = id_limpio.where(id_limpio != "", raw_id)
+
+    num_fotos = pd.Series(
+        [len(mapa_fotos.get(i) or mapa_fotos.get(r) or []) for i, r in zip(id_limpio, raw_id)],
+        index=df.index,
+    )
+    costo = _num(df, "costo", 0.0)
+    stock_raw = _num(df, "stock", 0)
+
+    valido = (id_limpio != "") & ~((costo <= 0) & (num_fotos == 0) & (stock_raw <= 0))
+    df, raw_id, id_limpio, num_fotos, costo = (x[valido] for x in (df, raw_id, id_limpio, num_fotos, costo))
+    if df.empty:
+        return pd.DataFrame()
+
+    out = _armar_inventario(df, raw_id, id_limpio, num_fotos, costo, mapa_origen)
+    out = out.sort_values("Ganancia Neta", ascending=False).drop_duplicates("ID Price Shoes")
+    return out.reset_index(drop=True)
+
+
+def evaluar_semaforo(df: pd.DataFrame, min_stock: int, min_ganancia: float) -> pd.DataFrame:
+    df = df.copy()
+    semaforo: List[str] = []
+    diagnostico: List[str] = []
+    for fotos, stock, gan in zip(df["_num_fotos"], df["Stock Publicable"], df["Ganancia Neta"]):
+        if fotos >= FOTOS_REQUERIDAS and stock >= min_stock and gan >= min_ganancia:
+            semaforo.append(RECOMENDADO)
+            diagnostico.append(f"✅ Listo para publicar ({FOTOS_REQUERIDAS}/{FOTOS_REQUERIDAS} HD)")
+        elif fotos < FOTOS_REQUERIDAS:
+            semaforo.append(NO_RECOMENDADO)
+            diagnostico.append(f"Faltan fotografías HD ({FOTOS_REQUERIDAS - fotos}/{FOTOS_REQUERIDAS})")
+        elif stock < min_stock:
+            semaforo.append(NO_RECOMENDADO)
+            diagnostico.append(f"Stock bajo ({stock} pares) · Fotos ({fotos}/{FOTOS_REQUERIDAS})")
+        else:
+            semaforo.append(NO_RECOMENDADO)
+            diagnostico.append(f"Margen ajustado · Fotos ({fotos}/{FOTOS_REQUERIDAS})")
+    df["Semáforo"] = semaforo
+    df["Diagnóstico Técnico"] = diagnostico
+    return df
+
+
+# ----------------------------------------------------------------------------------
+# SELECCIÓN "SUBIR A ML" (persistente)
+# ----------------------------------------------------------------------------------
+def cargar_seleccion_guardada() -> Optional[Set[str]]:
+    if not RUTA_BD.exists():
+        return None
+    with closing(sqlite3.connect(RUTA_BD)) as conn:
+        try:
+            return {str(r[0]) for r in conn.execute("SELECT id_ps FROM seleccion_ml")}
+        except sqlite3.Error:
+            return None
+
+
+def guardar_seleccion(ids: Set[str]) -> None:
+    with closing(sqlite3.connect(RUTA_BD)) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seleccion_ml ("
+            "id_ps TEXT PRIMARY KEY, actualizado TEXT DEFAULT CURRENT_TIMESTAMP)"
         )
+        conn.execute("DELETE FROM seleccion_ml")
+        conn.executemany("INSERT INTO seleccion_ml (id_ps) VALUES (?)", [(i,) for i in sorted(ids)])
+        conn.commit()
 
-    lista_multi: List[VarianteSucursal] = []
-    if not df_variantes_sku.empty and "variante" in df_variantes_sku.columns:
-        for _, rv in df_variantes_sku.iterrows():
-            t_nom = str(rv.get("variante") or "25")
-            sv = max(
-                0, int(pd.to_numeric(rv.get("stock_vallejo", 0), errors="coerce") or 0)
-            )
-            so = max(
-                0, int(pd.to_numeric(rv.get("stock_olivar", 0), errors="coerce") or 0)
-            )
-            sa = max(
-                0,
-                int(pd.to_numeric(rv.get("stock_arco_norte", 0), errors="coerce") or 0),
-            )
-            lista_multi.append(VarianteSucursal(t_nom, sv, so, sa))
 
-    if not lista_multi:
-        stk_base = max(12, int(stock_actual or 12))
-        c_part = max(3, stk_base // 4)
-        tallas_def = (
-            ("18", "19", "20", "21")
-            if "ESCOLAR" in titulo.upper()
-            else ("24", "25", "26", "27")
+def inicializar_estado(df_total: pd.DataFrame) -> None:
+    if "seleccion_ml" not in st.session_state:
+        guardada = cargar_seleccion_guardada() or set()
+        st.session_state.seleccion_ml = set(guardada)
+        st.session_state["_seleccion_guardada"] = set(guardada)
+    st.session_state.setdefault("ver_editor", 0)
+
+
+def resetear_filtros() -> None:
+    for k in FILTRO_KEYS:
+        st.session_state.pop(k, None)
+
+
+# ----------------------------------------------------------------------------------
+# TIENDA, EXISTENCIAS POR TIENDA Y ALERTAS DE PAUSA
+# ----------------------------------------------------------------------------------
+def configurar_tienda() -> Tuple[int, str, int]:
+    sb = st.sidebar
+    sb.header("🏬 Tienda")
+    with closing(inv.conectar(RUTA_BD)) as conn:
+        inv.asegurar_esquema(conn)
+        tiendas = inv.listar_tiendas(conn)
+        activa_id, _ = inv.tienda_activa(conn)
+        umbral_guardado = inv.umbral_pausa(conn)
+
+        ids = [t[0] for t in tiendas]
+        nombres = dict(tiendas)
+        tienda_id = sb.selectbox(
+            "Tienda a revisar",
+            ids,
+            index=ids.index(activa_id) if activa_id in ids else 0,
+            format_func=lambda i: nombres.get(i, str(i)),
         )
-        for t_d in tallas_def:
-            lista_multi.append(VarianteSucursal(t_d, c_part, 0, 0))
+        umbral = int(sb.number_input("Pausar si hay menos de (piezas)", 0, 500, umbral_guardado, 1))
 
-    res = ResultadoExtraccion(
-        sku=sku_limpio,
-        titulo=titulo or f"Modelo {sku_limpio}",
-        marca=marca or "Original",
-        categoria=categoria or "Calzado",
-        color=color or "Tono Original",
-        material=material or "Corte Sintético de Alta Resistencia",
-        costo_base=float(costo_base if costo_base > 0 else 390.0),
-        catalogo_origen=catalogo_origen or "Catálogo Urbano y Casual",
-        variantes_multisucursal=lista_multi,
-        variantes_brutas={vs.variante: vs.stock_bruto_total for vs in lista_multi},
-        variantes_netas={vs.variante: vs.stock_neto for vs in lista_multi},
-        stock_bruto_total=sum(vs.stock_bruto_total for vs in lista_multi),
-        stock_neto_total=sum(vs.stock_neto for vs in lista_multi),
-        imagenes_bytes=imgs,
-        fuente_extraccion="ESTUDIO_HD_DIRECTO",
-        url_final_secreta=f"https://www.priceshoes.com/buscar?q={sku_limpio}",
-    )
-
-    with DBHandler() as db:
-        ok = estudio.procesar_estudio_sku(db, "ESTUDIO_WEB_HD", res, dry_run=False)
-
-    if ok:
-        return True, f"4 láminas HD (1200x1200px) generadas para ID {sku_limpio}."
-    return False, f"Error al renderizar ID {sku_limpio}."
+        if tienda_id != activa_id or umbral != umbral_guardado:
+            inv.fijar_tienda_activa(conn, tienda_id)
+            inv.fijar_umbral_pausa(conn, umbral)
+            inv.recalcular_alertas(conn, tienda_id)
+    return tienda_id, nombres.get(tienda_id, str(tienda_id)), umbral
 
 
-# ==============================================================================
-# 3. BARRA LATERAL: CALIBRADOR DE UMBRALES Y CONFIGURACIÓN
-# ==============================================================================
-with st.sidebar:
-    st.markdown("### 🎛️ Calibrador de Umbrales")
-    st.caption(
-        "Ajusta estos parámetros para validar en vivo qué productos saldrían por riesgo:"
-    )
+def aplicar_inventario_tienda(df: pd.DataFrame, tienda_id: int) -> pd.DataFrame:
+    with closing(inv.conectar(RUTA_BD)) as conn:
+        resumen = inv.resumen_por_producto(conn, tienda_id)
 
-    st.session_state["limite_baja_stock"] = st.slider(
-        "Límite de Stock para Baja Automática (unidades)",
-        min_value=0,
-        max_value=15,
-        value=int(st.session_state["limite_baja_stock"]),
-        step=1,
-    )
-    st.session_state["lecturas_gracia_ucb"] = st.slider(
-        "Lecturas de Gracia UCB (Productos Nuevos)",
-        min_value=1,
-        max_value=15,
-        value=int(st.session_state["lecturas_gracia_ucb"]),
-        step=1,
-    )
-    st.session_state["dias_max_estancamiento"] = st.slider(
-        "Días Máximos sin Movimiento (Estancamiento)",
-        min_value=1.0,
-        max_value=30.0,
-        value=float(st.session_state["dias_max_estancamiento"]),
-        step=0.5,
-    )
-    st.session_state["pendiente_decay_lambda"] = st.slider(
-        "Pendiente de Caída Peligrosa λ (pares/día)",
-        min_value=0.5,
-        max_value=15.0,
-        value=float(st.session_state["pendiente_decay_lambda"]),
-        step=0.5,
-    )
-    st.session_state["factor_incertidumbre_ucb"] = st.slider(
-        "Factor de Incertidumbre UCB (c)",
-        min_value=0.10,
-        max_value=3.00,
-        value=float(st.session_state["factor_incertidumbre_ucb"]),
-        step=0.05,
-    )
-    st.session_state["media_bayesiana_min"] = st.slider(
-        "Media Bayesiana Mínima de Supervivencia",
-        min_value=0.05,
-        max_value=0.95,
-        value=float(st.session_state["media_bayesiana_min"]),
-        step=0.05,
-    )
+    df = df.copy()
+    info = [resumen.get(str(i), {}) for i in df["ID Price Shoes"]]
+    tipos_lista = [r.get("tipo") or inv.clasificar_tipo_producto(m) for r, m in zip(info, df["Modelo"])]
+    df["Tipo"] = tipos_lista
 
-    st.divider()
-    if st.button("🔄 Recargar Base de Datos del Disco", use_container_width=True):
-        st.session_state.pop("estado_bd_vallejo", None)
+    pares_maslow = [
+        inv.clasificar_matriz_maslow(m, c, t)
+        for m, c, t in zip(df["Modelo"], df["Catálogo"], df["Tipo"])
+    ]
+    df["Etapa Maslow"] = [p[0] for p in pares_maslow]
+    df["Cuadrante"] = [p[1] for p in pares_maslow]
+
+    df["_revisado"] = [r.get("stock") is not None for r in info]
+    df["Stock Publicable"] = [
+        int(r.get("stock")) if r.get("stock") is not None else int(stk_orig)
+        for r, stk_orig in zip(info, df["Stock Publicable"])
+    ]
+    df["Tallas en tienda"] = [r.get("tallas", "") for r in info]
+    df["Última revisión"] = [str(r.get("fecha", ""))[:16].replace("T", " ") for r in info]
+
+    with closing(inv.conectar(RUTA_BD)) as conn:
+        df = inv.agregar_comparacion_publico(df, conn)
+    return df
+
+
+def mostrar_alertas(tienda_id: int, tienda_nombre: str, umbral: int) -> None:
+    with closing(inv.conectar(RUTA_BD)) as conn:
+        alertas = inv.alertas_activas(conn, tienda_id)
+
+    pendientes = [a for a in alertas if not a["atendida"]]
+    if not alertas:
+        st.success(f"Sin alertas: ningún producto seleccionado tiene menos de {umbral} piezas en {tienda_nombre}.")
+        return
+
+    if pendientes:
+        st.error(f"⏸️ Pausar {len(pendientes)} productos: tienen menos de {umbral} piezas en {tienda_nombre}.")
+    else:
+        st.info(f"Las {len(alertas)} alertas de pausa ya están marcadas como atendidas.")
+
+    df_alertas = pd.DataFrame(alertas).rename(columns={
+        "id_ps": "ID Price Shoes", "nombre": "Modelo", "tipo": "Tipo", "stock_total": "Piezas en tienda",
+        "fecha_creada": "Alerta desde", "fecha_actualizada": "Última revisión", "atendida": "Ya pausado",
+    })
+    df_alertas["Ya pausado"] = df_alertas["Ya pausado"].astype(bool)
+    columnas = ["Ya pausado", "ID Price Shoes", "Modelo", "Tipo", "Piezas en tienda", "Alerta desde", "Última revisión"]
+    editado = st.data_editor(
+        df_alertas[columnas + ["id"]],
+        hide_index=True,
+        use_container_width=True,
+        column_config={"id": None},
+        disabled=[c for c in columnas if c != "Ya pausado"],
+        key=f"alertas_{tienda_id}",
+    )
+    cambios = [
+        (int(id_alerta), bool(nuevo))
+        for id_alerta, nuevo, previo in zip(editado["id"], editado["Ya pausado"], df_alertas["Ya pausado"])
+        if bool(nuevo) != bool(previo)
+    ]
+    if cambios:
+        with closing(inv.conectar(RUTA_BD)) as conn:
+            for id_alerta, atendida in cambios:
+                inv.marcar_alerta_atendida(conn, id_alerta, atendida)
         st.rerun()
 
-    st.divider()
-    st.markdown("### 💵 Parámetros de Precio (MeLi)")
-    st.session_state["comision_meli_pct"] = st.slider(
-        "Comisión MeLi (%):",
-        0.0,
-        25.0,
-        float(st.session_state["comision_meli_pct"]),
-        0.5,
+
+def guardar_seleccion_si_cambio(tienda_id: int) -> None:
+    actual = set(st.session_state.seleccion_ml)
+    if actual == st.session_state.get("_seleccion_guardada"):
+        return
+    try:
+        guardar_seleccion(actual)
+        with closing(inv.conectar(RUTA_BD)) as conn:
+            inv.recalcular_alertas(conn, tienda_id)
+        st.session_state["_seleccion_guardada"] = actual
+    except sqlite3.Error as e:
+        st.error(f"No se pudo guardar la selección: {e}")
+
+
+# ----------------------------------------------------------------------------------
+# FILTROS (barra lateral)
+# ----------------------------------------------------------------------------------
+def slider_rango(etiqueta: str, serie: pd.Series, key: str, formato: str = "%.0f") -> Optional[Tuple[float, float]]:
+    lo, hi = float(serie.min()), float(serie.max())
+    if not np.isfinite(lo) or lo >= hi:
+        return None
+    lo, hi = float(np.floor(lo)), float(np.ceil(hi))
+    return st.sidebar.slider(etiqueta, lo, hi, (lo, hi), format=formato, key=key)
+
+
+FILTRO_SEM_TODOS = "Todos"
+FILTRO_SEM_RECOMENDADOS = "✅ Solo Recomendados"
+FILTRO_SEM_PENDIENTES = "⚠️ Con Observaciones / Pendientes"
+
+FILTROS_DE_RANGO = (
+    ("Costo ($)", "Costo ($)", "f_costo", "%.0f"),
+    ("Precio sugerido ($)", "Precio Sugerido", "f_precio", "%.0f"),
+    ("Ganancia neta ($)", "Ganancia Neta", "f_ganancia", "%.0f"),
+    ("Margen (%)", "Margen (%)", "f_margen", "%.0f%%"),
+)
+
+
+def _filtrar_matriz_y_tipo(sb, df: pd.DataFrame) -> pd.DataFrame:
+    conteo_etapas = df["Etapa Maslow"].value_counts()
+    opciones_etapa = [inv.ETAPA_VERDE, inv.ETAPA_NARANJA, inv.ETAPA_GRIS]
+    etapas = sb.multiselect(
+        "🎯 Etapa Matriz Maslow",
+        opciones_etapa,
+        default=[inv.ETAPA_VERDE],
+        format_func=lambda e: f"{e} ({conteo_etapas.get(e, 0)})",
+        key="f_etapa",
     )
-    st.session_state["costo_envio_mxn"] = st.number_input(
-        "Costo Envío ($ MXN):",
-        0.0,
-        400.0,
-        float(st.session_state["costo_envio_mxn"]),
-        5.0,
+    if etapas:
+        df = df[df["Etapa Maslow"].isin(etapas)]
+
+    conteo_cuad = df["Cuadrante"].value_counts()
+    opciones_cuad = list(conteo_cuad.index)
+    cuadrantes = sb.multiselect(
+        "🟢 Cuadrante específico (vacío = todos)",
+        opciones_cuad,
+        format_func=lambda c: f"{c} ({conteo_cuad.get(c, 0)})",
+        key="f_cuadrante",
     )
-    st.session_state["margen_objetivo_pct"] = st.slider(
-        "Margen Neto Objetivo (%):",
-        10.0,
-        45.0,
-        float(st.session_state["margen_objetivo_pct"]),
-        1.0,
+    if cuadrantes:
+        df = df[df["Cuadrante"].isin(cuadrantes)]
+
+    conteo_tipos = df["Tipo"].value_counts()
+    opciones_tipo = [t for t in inv.TIPOS_PRODUCTO if t in conteo_tipos.index]
+    tipos = sb.multiselect(
+        "👟 Tipos de producto (vacío = todos)",
+        opciones_tipo,
+        format_func=lambda t: f"{t} ({conteo_tipos[t]})",
+        key="f_tipos",
     )
-    st.session_state["usar_costo_estimado"] = st.checkbox(
-        "Simular costo base cuando la BD no tenga precio extraído",
-        value=bool(st.session_state["usar_costo_estimado"]),
+    if tipos:
+        df = df[df["Tipo"].isin(tipos)]
+
+    tiene_stock_positivo = int((df["Stock Publicable"] > 0).sum()) > 0
+    if sb.checkbox("Solo con inventario en la tienda", value=tiene_stock_positivo, key="f_inventario"):
+        df = df[df["Stock Publicable"] > 0]
+    return df
+
+
+def _filtrar_origen_y_catalogo(sb, df: pd.DataFrame) -> pd.DataFrame:
+    conteo = df[df["Catálogo"] != SIN_CATALOGO]["Catálogo"].value_counts()
+    tiene_pdfs = not conteo.empty
+    origen = sb.radio(
+        "Origen del producto",
+        [ORIGEN_PDF, ORIGEN_TODO, ORIGEN_WEB],
+        index=0 if tiene_pdfs else 1,
+        key="f_origen",
     )
-    if st.session_state["usar_costo_estimado"]:
-        st.session_state["costo_estimado_default"] = st.number_input(
-            "Costo estimado ($):",
-            100.0,
-            2000.0,
-            float(st.session_state["costo_estimado_default"]),
-            10.0,
+    if origen == ORIGEN_PDF and tiene_pdfs:
+        df = df[df["Catálogo"] != SIN_CATALOGO]
+    elif origen == ORIGEN_WEB:
+        df = df[df["Catálogo"] == SIN_CATALOGO]
+
+    oficiales = list(NOMBRES_CATALOGOS.values())
+    opciones_cat = [c for c in oficiales if c in conteo.index] + [c for c in conteo.index if c not in oficiales]
+    elegidos = sb.multiselect(
+        "📘 Catálogos (vacío = todos)",
+        opciones_cat,
+        format_func=lambda c: f"{c} ({conteo[c]} SKUs)",
+        key="f_catalogos",
+    )
+    return df[df["Catálogo"].isin(elegidos)] if elegidos else df
+
+
+def _filtrar_semaforo(sb, df: pd.DataFrame) -> pd.DataFrame:
+    filtro_sem = sb.radio(
+        "🚦 Semáforo",
+        [FILTRO_SEM_TODOS, FILTRO_SEM_RECOMENDADOS, FILTRO_SEM_PENDIENTES],
+        key="f_semaforo",
+    )
+    if filtro_sem == FILTRO_SEM_RECOMENDADOS:
+        return df[df["Semáforo"] == RECOMENDADO]
+    if filtro_sem != FILTRO_SEM_TODOS:
+        return df[df["Semáforo"] != RECOMENDADO]
+    return df
+
+
+def _filtrar_busqueda(sb, df: pd.DataFrame) -> pd.DataFrame:
+    busqueda = sb.text_input("🔍 Buscar (ID, SKU, modelo o catálogo)", key="f_busqueda").strip().lower()
+    if not busqueda:
+        return df
+    pajar = (
+        df["ID Price Shoes"].astype(str) + " " + df["SKU Interno"].astype(str) + " "
+        + df["Modelo"].astype(str) + " " + df["Catálogo"].astype(str)
+    ).str.lower()
+    mask = pd.Series(True, index=df.index)
+    for termino in busqueda.split():
+        mask &= pajar.str.contains(termino, regex=False)
+    return df[mask]
+
+
+def _filtrar_rangos(sb, df: pd.DataFrame, df_total: pd.DataFrame) -> pd.DataFrame:
+    sb.markdown("**💲 Costos, precios y márgenes**")
+    for etiqueta, columna, key, formato in FILTROS_DE_RANGO:
+        r = slider_rango(etiqueta, df_total[columna], key, formato)
+        if r:
+            df = df[df[columna].between(*r)]
+
+    max_stock = int(df_total["Stock Publicable"].max()) if not df_total.empty else 0
+    if max_stock > 0:
+        min_stock_f = sb.slider("Stock mínimo (pares)", 0, max_stock, 0, key="f_stock")
+        df = df[df["Stock Publicable"] >= min_stock_f]
+
+    rango_fotos = sb.select_slider(
+        "📸 Fotos HD disponibles", options=list(range(FOTOS_REQUERIDAS + 1)),
+        value=(0, FOTOS_REQUERIDAS), key="f_fotos",
+    )
+    return df[df["_num_fotos"].between(*rango_fotos)]
+
+
+def _ordenar(sb, df: pd.DataFrame) -> pd.DataFrame:
+    orden = sb.selectbox("↕️ Ordenar por", OPCIONES_ORDEN, key="f_orden")
+    ascendente = sb.checkbox("Orden ascendente", value=False, key="f_asc")
+    if orden != ORDEN_DEFAULT:
+        return df.sort_values(orden, ascending=ascendente)
+    return (
+        df.assign(_r=df["Semáforo"] != RECOMENDADO)
+        .sort_values(["_r", "Ganancia Neta", "Stock Publicable"], ascending=[True, False, False])
+        .drop(columns="_r")
+    )
+
+
+def aplicar_filtros(df_total: pd.DataFrame) -> pd.DataFrame:
+    sb = st.sidebar
+    sb.header("🔎 Filtros de Auditoría")
+    sb.button("🧹 Limpiar filtros", on_click=resetear_filtros, use_container_width=True)
+
+    df = _filtrar_matriz_y_tipo(sb, df_total)
+    df = _filtrar_origen_y_catalogo(sb, df)
+    df = _filtrar_semaforo(sb, df)
+    df = _filtrar_busqueda(sb, df)
+    df = _filtrar_rangos(sb, df, df_total)
+    df = _ordenar(sb, df)
+    return df.reset_index(drop=True)
+
+
+# ----------------------------------------------------------------------------------
+# PANEL
+# ----------------------------------------------------------------------------------
+COLUMNAS_MATRIZ = [
+    "Subir a ML", "ID Price Shoes", "SKU Interno", "Cuadrante", "Tipo", "Catálogo", "Modelo", "Enlace Original",
+    "Semáforo", "Costo ($)", "Precio Sugerido", "Ganancia Neta", "Margen (%)",
+    *inv.COLUMNAS_COMPARACION,
+    "Stock Publicable", "Tallas en tienda", "Última revisión", "Diagnóstico Técnico",
+]
+
+
+def _mostrar_gestos_verdes(df_total: pd.DataFrame) -> None:
+    """Resumen ejecutivo de los 4 cuadrantes verdes de la Matriz de Maslow."""
+    st.markdown("#### 🟢 Gestos del Sistema en los 4 Cuadrantes Verdes (*Empezar aquí*)")
+    cols_v = st.columns(4)
+    for col_ui, cuad in zip(cols_v, inv.CUADRANTES_VERDES):
+        sub = df_total[df_total["Cuadrante"] == cuad]
+        con_stk = sub[sub["Stock Publicable"] > 0]
+        rec = int((sub["Semáforo"] == RECOMENDADO).sum())
+        gan_prom = float(con_stk["Ganancia Neta"].mean()) if not con_stk.empty else 0.0
+        col_ui.metric(
+            label=cuad,
+            value=f"{len(con_stk):,} con stock",
+            delta=f"{rec} recomendados · Gan. prom: ${gan_prom:,.0f}",
+            help=f"Total en catálogo para este cuadrante: {len(sub):,} SKUs",
         )
 
 
-# ==============================================================================
-# 4. CARGA EN MEMORIA (`st.session_state`) USANDO EL LECTOR REAL DE `zapateria_vallejo.db`
-# ==============================================================================
-mtime_actual_bd = Config.RUTA_BD.stat().st_mtime if Config.RUTA_BD.exists() else 0.0
-if (
-"estado_bd_vallejo" not in st.session_state
-or st.session_state.get("mtime_bd_vallejo") != mtime_actual_bd
-):
-st.session_state["estado_bd_vallejo"] = cargar_estado_completo_bd(Config.RUTA_BD)
-st.session_state["mtime_bd_vallejo"] = mtime_actual_bd
-st.session_state["lecturas_gracia_ucb"] = Config.LECTURAS_GRACIA_UCB
-
-estado_bd = st.session_state["estado_bd_vallejo"]
-df_maestro = estado_bd["df_maestro"].copy()
-df_bitacora = estado_bd["df_bitacora"]
-df_variantes = estado_bd["df_variantes"]
-
-total_aud_bd = int((col_int(df_maestro, "auditado_etl", 0) >= 1).sum())
-
-st.title("📊 Zapatería Vallejo · Laboratorio de Análisis ETL, Lanzador MeLi & Estudio HD")
-st.caption(
-    f"Arquitectura de Serie de Tiempo (Time-Series), Modelo Probabilístico Bayesiano + UCB y Estudio Fotográfico 1200x1200px  |  "
-    f"📂 Catálogo: `zapateria_vallejo.db:zapatos_candidatos ({len(df_maestro):,} SKUs)` · "
-    f"🔍 Auditoría ETL: `historial_stock_21_dias + historial_inventario ({total_aud_bd:,} SKUs auditados)`"
-)
-
-df_maestro["id_ps"] = col_txt(df_maestro, "id_ps", "").str.strip()
-df_maestro["nombre_modelo"] = col_txt(df_maestro, "nombre_modelo", "Modelo Catálogo")
-df_maestro["marca"] = [
-    extraer_marca_real(str(r.get("nombre_modelo", "")), str(r.get("marca", "")))
-    for _, r in df_maestro.iterrows()
-]
-df_maestro["catalogo_origen"] = [
-    clasificar_catalogo_origen(
-        str(r.get("nombre_modelo", "")),
-        str(r.get("marca", "")),
-        str(r.get("catalogo_origen", "")),
-    )
-    for _, r in df_maestro.iterrows()
-]
-df_maestro["es_restringida_meli"] = [
-    es_marca_restringida_meli(
-        str(r.get("marca", "")),
-        str(r.get("nombre_modelo", "")),
-        st.session_state["marcas_bloqueadas_custom"],
-    )
-    for _, r in df_maestro.iterrows()
-]
-df_maestro["¿Permitida en MeLi?"] = np.where(
-    df_maestro["es_restringida_meli"],
-    "🚫 Restringida en MeLi (Otra Plataforma)",
-    "✅ Permitida en MeLi",
-)
-
-df_maestro["stock_vallejo"] = col_int(
-    df_maestro,
-    "stock_vallejo" if "stock_vallejo" in df_maestro.columns else "stock_actual",
-    0,
-)
-df_maestro["stock_olivar"] = col_int(df_maestro, "stock_olivar", 0)
-df_maestro["stock_arco_norte"] = col_int(df_maestro, "stock_arco_norte", 0)
-
-c_f1, c_f2, c_f3, c_f4 = st.columns([1.45, 1.25, 1.30, 1.0])
-with c_f1:
-    modo_canal = st.radio(
-        "1️⃣ Canal de Venta:",
-        options=[
-            "🌐 Catálogo Completo (Todas las marcas / Otra Plataforma)",
-            "🤝 Solo Mercado Libre (Descartar marcas restringidas)",
-        ],
-        index=0,
-    )
-with c_f2:
-    cats_disp = sorted(df_maestro["catalogo_origen"].dropna().unique().tolist())
-    filtro_catalogo = st.multiselect(
-        "2️⃣ Escoger por Catálogo:",
-        options=cats_disp,
-        default=[],
-        placeholder="Todos los catálogos...",
-    )
-with c_f3:
-    st.markdown("3️⃣ **Sucursales a considerar en Stock:**")
-    cs1, cs2, cs3 = st.columns(3)
-    inc_val = cs1.checkbox("Vallejo", value=True)
-    inc_oli = cs2.checkbox("Olivar", value=True)
-    inc_arc = cs3.checkbox("Arco N.", value=True)
-with c_f4:
-    busqueda_txt = st.text_input(
-        "4️⃣ Buscar ID o Modelo:", value="", placeholder="Ej. 1262647, Mocasín..."
-    ).strip()
-
-suma_suc = (
-    (df_maestro["stock_vallejo"] if inc_val else 0)
-    + (df_maestro["stock_olivar"] if inc_oli else 0)
-    + (df_maestro["stock_arco_norte"] if inc_arc else 0)
-)
-df_maestro["stock_actual"] = np.where(
-    (
-        df_maestro["stock_vallejo"]
-        + df_maestro["stock_olivar"]
-        + df_maestro["stock_arco_norte"]
-    )
-    > 0,
-    suma_suc,
-    col_int(df_maestro, "stock_actual", 0) if inc_val else 0,
-).astype(int)
-
-# Evaluar el modelo matemático (Score UCB + Autonomía 24h + Reserva Poisson)
-df_maestro = evaluar_dataframe_quant(
-    df=df_maestro,
-    lim_baja=int(st.session_state["limite_baja_stock"]),
-    gracia_ucb=int(st.session_state["lecturas_gracia_ucb"]),
-    lim_dias=float(st.session_state["dias_max_estancamiento"]),
-    lim_lambda=float(st.session_state["pendiente_decay_lambda"]),
-    c_ucb=float(st.session_state["factor_incertidumbre_ucb"]),
-    lim_bayes=float(st.session_state["media_bayesiana_min"]),
-)
-
-# Precios reales (usando costo_socio / costo_bodega / precio_ml de `zapatos_candidatos`)
-costo_real_s = col_num(df_maestro, "costo_base", 0.0)
-precio_ml_db_s = col_num(df_maestro, "precio_ml_db", 0.0)
-util_ml_db_s = col_num(df_maestro, "utilidad_ml_db", 0.0)
-
-if st.session_state["usar_costo_estimado"]:
-    costo_efectivo = np.where(
-        costo_real_s > 0,
-        costo_real_s,
-        float(st.session_state["costo_estimado_default"]),
-    )
-else:
-    costo_efectivo = costo_real_s.to_numpy()
-
-c_dec = float(st.session_state["comision_meli_pct"]) / 100.0
-m_dec = float(st.session_state["margen_objetivo_pct"]) / 100.0
-i_dec = 0.035
-env_val = float(st.session_state["costo_envio_mxn"])
-den = max(0.12, 1.0 - c_dec - m_dec - i_dec)
-
-p_bruto = np.where(costo_efectivo > 0, (costo_efectivo + env_val) / den, 0.0)
-p_ceil9 = np.where(costo_efectivo > 0, np.ceil(p_bruto / 10.0) * 10.0 - 1.0, 0.0)
-p_calc = np.where(
-    (costo_efectivo > 0) & (p_ceil9 < p_bruto), p_ceil9 + 10.0, p_ceil9
-)
-p_venta = np.where(p_calc > 0, p_calc, precio_ml_db_s.to_numpy())
-gastos_v = np.where(p_venta > 0, np.round(p_venta * (c_dec + i_dec) + env_val, 2), 0.0)
-ganancia_calc = np.where(
-    (p_venta > 0) & (costo_efectivo > 0),
-    np.round(p_venta - costo_efectivo - gastos_v, 2),
-    util_ml_db_s.to_numpy(),
-)
-
-df_maestro["costo_num"] = np.round(costo_efectivo, 2)
-df_maestro["precio_venta_num"] = np.round(p_venta, 2)
-df_maestro["ganancia_num"] = np.round(ganancia_calc, 2)
-df_maestro["Precio Compra"] = [
-    f"$ {v:,.2f}" if v > 0 else "Sin precio ($0)" for v in df_maestro["costo_num"]
-]
-df_maestro["Precio Venta Sugerido"] = [
-    f"$ {v:,.2f}" if v > 0 else "Pendiente costo"
-    for v in df_maestro["precio_venta_num"]
-]
-df_maestro["Ganancia Libre ($)"] = [
-    f"$ {v:,.2f}" if p > 0 else "—"
-    for v, p in zip(df_maestro["ganancia_num"], df_maestro["precio_venta_num"])
-]
-
-df_vista = df_maestro.copy()
-if modo_canal.startswith("🤝"):
-    df_vista = df_vista[~df_vista["es_restringida_meli"]]
-if filtro_catalogo:
-    df_vista = df_vista[df_vista["catalogo_origen"].isin(filtro_catalogo)]
-if busqueda_txt:
-    q = busqueda_txt.lower()
-    df_vista = df_vista[
-        df_vista["id_ps"].str.lower().str.contains(q, na=False)
-        | df_vista["nombre_modelo"].str.lower().str.contains(q, na=False)
-        | df_vista["marca"].str.lower().str.contains(q, na=False)
-    ]
-
-df_auditados = df_vista[df_vista["auditado_etl"] >= 1].copy()
-
-meta_n = int(st.session_state["meta_publicacion_meli"])
-df_listos_meli_reales = df_maestro[
-    (df_maestro["auditado_etl"] >= 1)
-    & (~df_maestro["es_restringida_meli"])
-    & (df_maestro["accion_meli"] == "PUBLICAR_ACTIVO")
-    & (df_maestro["horas_autonomia"] > Config.HORAS_MIN_AUTONOMIA_MELI)
-    & (df_maestro["stock_publicable_meli"] > 0)
-].sort_values(
-    by=[
-        "score_prioridad_meli",
-        "tasa_decaimiento",
-        "score_ucb_simulado",
-        "stock_publicable_meli",
-    ],
-    ascending=[False, False, False, False],
-)
-
-df_top100_meli = df_listos_meli_reales.head(meta_n).copy()
+def _mostrar_metricas(df: pd.DataFrame, df_total: pd.DataFrame) -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📦 SKUs en vista", f"{len(df):,}", help=f"de {len(df_total):,} en total")
+    c2.metric("✅ Recomendados", f"{int((df['Semáforo'] == RECOMENDADO).sum()):,}")
+    c3.metric("📸 Con carrusel HD (4/4)", f"{int((df['_num_fotos'] >= FOTOS_REQUERIDAS).sum()):,}")
+    c4.metric("💰 Ganancia neta promedio", f"${df['Ganancia Neta'].mean() if not df.empty else 0:,.2f}")
 
 
-# ==============================================================================
-# 5. KPIS DEL LABORATORIO Y DE AUTONOMÍA 24H
-# ==============================================================================
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Catálogo Total", f"{len(df_vista):,}")
-k2.metric("SKUs Auditados (ETL)", f"{len(df_auditados):,}")
-k3.metric(
-    "En Exploración UCB",
-    f"{int((df_auditados['estatus_simulado'] == 'EXPLORACION_UCB').sum()):,}",
-)
-k4.metric(
-    "Activos Sanos",
-    f"{int((df_auditados['estatus_simulado'] == 'ACTIVO_SANO').sum()):,}",
-)
-k5.metric(
-    "Alerta Decay (λ)",
-    f"{int((df_auditados['estatus_simulado'] == 'ALERTA_DECAY').sum()):,}",
-)
-k6.metric(
-    "Candidatos a Baja",
-    f"{int((df_auditados['estatus_simulado'] == 'BAJA_AUTOMATICA').sum()):,}",
-)
-
-s1, s2, s3, s4, s5, s6 = st.columns(6)
-s1.metric(
-    "🚀 Con Stock Real p/ MeLi",
-    f"{len(df_listos_meli_reales):,} SKUs",
-    delta=f"Top {len(df_top100_meli)}/{meta_n} listos",
-)
-s2.metric(
-    "📍 Stock Real Vallejo / Gral.",
-    f"{int(df_auditados['stock_vallejo'].sum()):,} u.",
-)
-s3.metric(
-    "📍 Stock Real Olivar",
-    f"{int(df_auditados['stock_olivar'].sum()):,} u.",
-)
-s4.metric(
-    "📍 Stock Real Arco Norte",
-    f"{int(df_auditados['stock_arco_norte'].sum()):,} u.",
-)
-s5.metric(
-    "📦 Stock Total Auditado",
-    f"{int(df_auditados['stock_actual'].sum()):,} u.",
-)
-s6.metric(
-    "✅ Publicables (Tras Reserva)",
-    f"{int(df_auditados['stock_publicable_meli'].sum()):,} u.",
-)
-
-st.divider()
-
-
-# ==============================================================================
-# 6. LAS 7 PESTAÑAS COMPLETAS DEL ECOSISTEMA
-# ==============================================================================
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    [
-        "🎯 1. Matriz de Riesgo y Simulación de Umbrales",
-        f"🚀 2. Lanzador Real Top {meta_n} MeLi & Más Vendidos",
-        "📸 3. Estudio Fotográfico HD (4 Láminas 1200x1200px)",
-        "📊 4. Gráficos Analíticos (Bayes, UCB, Rotación λ)",
-        "📉 5. Curva de Decaimiento por SKU (Time-Series)",
-        "💵 6. Tabla de Precios, Sucursales y Simulador",
-        "⏱️ 7. Bitácora Histórica (Timestamps) y Planificador",
-    ]
-)
-
-
-# ==============================================================================
-# TAB 1: MATRIZ DE RIESGO Y SIMULACIÓN DE UMBRALES
-# ==============================================================================
-with tab1:
-    st.subheader("Resultados del Lote Auditado bajo los Umbrales Seleccionados")
-    c_r1, c_r2 = st.columns([2.2, 1.2])
-    with c_r1:
-        opciones_r = [
-            "BAJA_AUTOMATICA",
-            "EXPLORACION_UCB",
-            "ACTIVO_SANO",
-            "ALERTA_DECAY",
-        ]
-        filtro_r = st.multiselect(
-            "Filtrar por Clasificación de Riesgo:",
-            options=opciones_r,
-            default=opciones_r,
-        )
-    with c_r2:
-        orden_col = st.selectbox(
-            "Ordenar tabla por:",
-            options=[
-                "stock_actual",
-                "score_ucb_simulado",
-                "horas_autonomia",
-                "tasa_decaimiento",
-                "delta_stock",
-                "media_bayesiana",
-            ],
-            index=0,
-        )
-
-    df_t1 = df_auditados[df_auditados["estatus_simulado"].isin(filtro_r)].sort_values(
-        by=orden_col, ascending=False
-    )
-    st.dataframe(
-        df_t1[
-            [
-                "id_ps",
-                "nombre_modelo",
-                "marca",
-                "catalogo_origen",
-                "¿Permitida en MeLi?",
-                "stock_actual",
-                "reserva_dinamica_24h",
-                "stock_publicable_meli",
-                "horas_autonomia",
-                "delta_stock",
-                "tasa_decaimiento",
-                "media_bayesiana",
-                "score_ucb_simulado",
-                "num_lecturas",
-                "estatus_simulado",
-                "motivo_simulado",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-        height=470,
-    )
-
-
-# ==============================================================================
-# TAB 2: LANZADOR REAL TOP 100 MELI & MÁS VENDIDOS
-# ==============================================================================
-with tab2:
-    st.subheader(
-        f"🚀 Lote Top {len(df_top100_meli)} Mercado Libre con Garantía Matemática Anti-Quiebre a 24 Horas"
-    )
+def _mostrar_matriz(df: pd.DataFrame, tienda_id: int, tienda_nombre: str) -> None:
+    b1, b2, _ = st.columns([1, 1, 4])
+    ids_vista = set(df["ID Price Shoes"])
+    if b1.button("☑️ Marcar visibles", use_container_width=True):
+        st.session_state.seleccion_ml |= ids_vista
+        st.session_state.ver_editor += 1
+    if b2.button("⬜ Desmarcar visibles", use_container_width=True):
+        st.session_state.seleccion_ml -= ids_vista
+        st.session_state.ver_editor += 1
     st.caption(
-        f"De los {len(df_listos_meli_reales):,} SKUs con stock físico real y marca permitida, estos son los {len(df_top100_meli)} mejores priorizados para publicación automática."
+        "Marca **Seleccionado** en los productos que vas a vender: se guardan solos y son los que se "
+        "exportan a Mercado Libre y generan alertas de pausa."
     )
 
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        if st.button(
-            "⚡ Actualizar `data/cola_sincronizacion_ml.json` Ahora",
-            use_container_width=True,
-            type="primary",
-        ):
-            c_a, c_b = seleccionar_lote_doble_carril(df_maestro)
-            cola_out = generar_cola_sincronizacion_ml(
-                df_maestro, c_a, c_b, Config.RUTA_COLA_MELI
-            )
-            st.success(
-                f"Cola sincronizada en `{Config.RUTA_COLA_MELI}`: "
-                f"{cola_out['metadata']['total_top_100_meli']} en Top 100 MeLi y "
-                f"{cola_out['metadata']['total_cola_otras_plataformas']} para Otras Plataformas."
-            )
-    with col_b2:
-        st.download_button(
-            label=f"📥 Descargar Lote Top {len(df_top100_meli)} MeLi Blindado 24h (.csv)",
-            data=df_top100_meli.to_csv(index=False).encode("utf-8-sig"),
-            file_name="top_100_meli_blindado_24h.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+    columnas = COLUMNAS_MATRIZ
+    df_editor = df.assign(**{"Subir a ML": df["ID Price Shoes"].isin(st.session_state.seleccion_ml)})[columnas]
 
-    st.dataframe(
-        df_top100_meli[
-            [
-                "id_ps",
-                "score_prioridad_meli",
-                "catalogo_origen",
-                "marca",
-                "nombre_modelo",
-                "stock_actual",
-                "reserva_dinamica_24h",
-                "stock_publicable_meli",
-                "horas_autonomia",
-                "tasa_decaimiento",
-                "score_ucb_simulado",
-                "Precio Compra",
-                "Precio Venta Sugerido",
-                "Ganancia Libre ($)",
-            ]
-        ],
+    editado = st.data_editor(
+        df_editor,
         use_container_width=True,
         hide_index=True,
-        height=390,
+        height=400,
+        column_config={
+            "Subir a ML": st.column_config.CheckboxColumn("Seleccionado", default=False),
+            "Stock Publicable": st.column_config.NumberColumn(f"Piezas en {tienda_nombre}"),
+            "Enlace Original": st.column_config.LinkColumn("Enlace Original", display_text="Ver en PS"),
+            "Costo ($)": st.column_config.NumberColumn("Costo ($)", format="$%.0f"),
+            "Precio Sugerido": st.column_config.NumberColumn("Precio Sugerido", format="$%.0f"),
+            "Ganancia Neta": st.column_config.NumberColumn("Ganancia Neta", format="$%.2f"),
+            "Margen (%)": st.column_config.NumberColumn("Margen (%)", format="%.1f%%"),
+            "Precio público PS": st.column_config.NumberColumn("Precio público PS", format="$%.0f"),
+            "Descuento socio (%)": st.column_config.NumberColumn("Descuento socio (%)", format="%.1f%%"),
+            "Sobreprecio vs PS (%)": st.column_config.NumberColumn("Sobreprecio vs PS (%)", format="%.1f%%"),
+            "Ganancia directa ($)": st.column_config.NumberColumn("Ganancia directa ($)", format="$%.0f"),
+        },
+        disabled=[c for c in columnas if c != "Subir a ML"],
+        key=f"editor_{st.session_state.ver_editor}_{hash(tuple(df['ID Price Shoes']))}",
     )
 
-    st.divider()
-    st.subheader(
-        "🌐 Cola Gradual para Otras Plataformas (Incluye Marcas Restringidas en MeLi con Stock Sano)"
-    )
-    df_otras = df_maestro[
-        (df_maestro["auditado_etl"] >= 1)
-        & (~df_maestro["id_ps"].isin(df_top100_meli["id_ps"]))
-        & (df_maestro["stock_actual"] > int(st.session_state["limite_baja_stock"]))
-    ].sort_values(
-        by=["tasa_decaimiento", "score_ucb_simulado", "stock_actual"],
-        ascending=[False, False, False],
-    )
-
-    st.dataframe(
-        df_otras[
-            [
-                "id_ps",
-                "catalogo_origen",
-                "marca",
-                "¿Permitida en MeLi?",
-                "nombre_modelo",
-                "stock_actual",
-                "tasa_decaimiento",
-                "score_ucb_simulado",
-                "estatus_simulado",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# ==============================================================================
-# TAB 3: ESTUDIO FOTOGRÁFICO HD (4 LÁMINAS 1200x1200px)
-# ==============================================================================
-with tab3:
-    st.subheader("📸 Estudio Fotográfico de Alta Gama (4 Láminas 1200x1200px)")
-
-    skus_con_carpeta = listar_skus_con_laminas_en_disco()
-    candidatos_estudio = (
-        skus_con_carpeta
-        + df_top100_meli["id_ps"].tolist()
-        + df_auditados.sort_values(by="stock_actual", ascending=False)["id_ps"]
-        .head(300)
-        .tolist()
-        + df_vista["id_ps"].head(200).tolist()
-    )
-    opciones_estudio = [s for s in dict.fromkeys(candidatos_estudio) if s]
-
-    mapa_filas_est = (
-        df_maestro[df_maestro["id_ps"].isin(opciones_estudio)]
-        .drop_duplicates("id_ps")
-        .set_index("id_ps")
-        .to_dict("index")
-    )
-
-    def _fmt_est(sku_k: str) -> str:
-        info = mapa_filas_est.get(sku_k, {})
-        nom = str(info.get("nombre_modelo") or f"Modelo {sku_k}")
-        mar = str(info.get("marca") or "Original")
-        stk = int(info.get("stock_actual") or 0)
-        n_lam = contar_laminas_listas_sku(sku_k)
-        ic = "✅" if n_lam == 4 else ("🟡" if n_lam > 0 else "⚪")
-        return (
-            f"{ic} ID {sku_k} — {mar.upper()} · {nom} (Stock: {stk} u. | {n_lam}/4 láminas)"
-        )
-
-    col_sel_est, col_btn_fast, col_btn_zip = st.columns([2.4, 1.2, 1.2])
-    with col_sel_est:
-        sku_estudio = st.selectbox(
-            "Seleccionar SKU para inspeccionar o renderizar sus 4 láminas:",
-            options=opciones_estudio,
-            format_func=_fmt_est,
-        )
-
-    info_sku_est = mapa_filas_est.get(str(sku_estudio), {})
-    nom_est = str(info_sku_est.get("nombre_modelo") or f"Modelo {sku_estudio}")
-    mar_est = str(info_sku_est.get("marca") or "Original")
-    cat_est = str(info_sku_est.get("categoria") or "Calzado")
-    col_est = str(info_sku_est.get("color") or "Tono Original")
-    mat_est = str(
-        info_sku_est.get("material") or "Corte Sintético de Alta Resistencia"
-    )
-    costo_est = float(info_sku_est.get("costo_num") or 390.0)
-    cat_orig_est = str(
-        info_sku_est.get("catalogo_origen") or "Catálogo Urbano y Casual"
-    )
-    stk_est = int(info_sku_est.get("stock_actual") or 12)
-
-    df_var_sku_est = (
-        df_variantes[
-            col_txt(df_variantes, "sku", "").str.strip() == str(sku_estudio)
-        ].copy()
-        if not df_variantes.empty
-        else pd.DataFrame()
-    )
-
-    with col_btn_fast:
-        st.write("")
-        if st.button(
-            "⚡ Renderizar 4 Láminas HD (1 seg)",
-            use_container_width=True,
-            type="primary",
-        ):
-            ok_r, msg_r = renderizar_4_laminas_en_vivo(
-                sku=str(sku_estudio),
-                titulo=nom_est,
-                marca=mar_est,
-                categoria=cat_est,
-                color=col_est,
-                material=mat_est,
-                costo_base=costo_est,
-                catalogo_origen=cat_orig_est,
-                stock_actual=stk_est,
-                df_variantes_sku=df_var_sku_est,
-            )
-            if ok_r:
-                st.success(msg_r)
-                st.rerun()
-            else:
-                st.error(msg_r)
-
-    with col_btn_zip:
-        st.write("")
-        zip_bytes = empaquetar_zip_4_laminas(str(sku_estudio))
-        if zip_bytes:
-            st.download_button(
-                label=f"📦 Descargar ZIP 4 Láminas ({sku_estudio})",
-                data=zip_bytes,
-                file_name=f"SINERGIA_{sku_estudio}_4_laminas_HD.zip",
-                mime="application/zip",
-                use_container_width=True,
-            )
-
-    rutas_sku_actual = resolver_rutas_laminas_sku(str(sku_estudio))
-    columnas_galeria = st.columns(4)
-
-    for idx_col, tipo_act in enumerate(Config.TIPOS_ACTIVO):
-        ruta_img = rutas_sku_actual.get(tipo_act)
-        col_ui = columnas_galeria[idx_col]
-        titulo_cap = ETIQUETAS_LAMINAS.get(tipo_act, tipo_act)
-
-        if ruta_img is not None and ruta_img.exists():
-            raw_img = ruta_img.read_bytes()
-            col_ui.image(raw_img, caption=titulo_cap, use_container_width=True)
-            col_ui.download_button(
-                label=f"⬇️ {ruta_img.name}",
-                data=raw_img,
-                file_name=ruta_img.name,
-                mime="image/png",
-                key=f"dl_est_{sku_estudio}_{tipo_act}",
-                use_container_width=True,
-            )
+    for id_, marcado in zip(editado["ID Price Shoes"], editado["Subir a ML"]):
+        if marcado:
+            st.session_state.seleccion_ml.add(id_)
         else:
-            raw_ph = generar_placeholder_estudio(str(sku_estudio), tipo_act, nom_est)
-            col_ui.image(
-                raw_ph, caption=f"⚠️ Pendiente: {titulo_cap}", use_container_width=True
-            )
+            st.session_state.seleccion_ml.discard(id_)
+    guardar_seleccion_si_cambio(tienda_id)
 
 
-# ==============================================================================
-# TAB 4: GRÁFICOS ANALÍTICOS (EMBUDO, RIESGO, MAPA UCB Y CATÁLOGOS)
-# ==============================================================================
-with tab4:
-    st.subheader("📊 Gráficos Analíticos del Lote Auditado y Blindaje 24h")
-    g1, g2 = st.columns(2)
-    with g1:
-        fig_fun = go.Figure(
-            go.Funnel(
-                y=[
-                    "1. Catálogo Maestro Total",
-                    "2. SKUs Auditados (ETL)",
-                    "3. ConStock > Reserva y Autonomía > 24h",
-                    "4. Elegibles MeLi (Marca Permitida)",
-                ],
-                x=[
-                    len(df_maestro),
-                    int((df_maestro["auditado_etl"] >= 1).sum()),
-                    int(
-                        (
-                            (df_maestro["auditado_etl"] >= 1)
-                            & (df_maestro["accion_meli"] == "PUBLICAR_ACTIVO")
-                        ).sum()
-                    ),
-                    len(df_listos_meli_reales),
-                ],
-                textinfo="value+percent initial",
-                marker={"color": ["#334155", "#3B82F6", "#10B981", "#F59E0B"]},
-            )
-        )
-        fig_fun.update_layout(
-            title="Embudo Real de Conversión hacia Top 100 MeLi",
-            template="plotly_dark",
-            height=380,
-        )
-        st.plotly_chart(fig_fun, use_container_width=True)
-
-    with g2:
-        df_cnt_riesgo = (
-            df_auditados.groupby("estatus_simulado", as_index=False)
-            .size()
-            .rename(columns={"size": "SKUs Auditados"})
-        )
-        fig_r = px.bar(
-            df_cnt_riesgo,
-            x="estatus_simulado",
-            y="SKUs Auditados",
-            color="estatus_simulado",
-            text_auto=True,
-            title=f"Distribución de Riesgo ({len(df_auditados):,} SKUs Auditados)",
-            color_discrete_map={
-                "EXPLORACION_UCB": "#3B82F6",
-                "ACTIVO_SANO": "#10B981",
-                "ALERTA_DECAY": "#F59E0B",
-                "BAJA_AUTOMATICA": "#EF4444",
-            },
-        )
-        fig_r.update_layout(template="plotly_dark", height=380)
-        st.plotly_chart(fig_r, use_container_width=True)
-
-
-# ==============================================================================
-# TAB 5: CURVA DE DECAIMIENTO POR SKU (TIME-SERIES)
-# ==============================================================================
-with tab5:
-    st.subheader(
-        "📉 Curva de Decaimiento por SKU (Time-Series) y Proyección Anti-Quiebre 24h"
+def _mostrar_acciones_seleccion(df_total: pd.DataFrame) -> None:
+    seleccion = df_total[df_total["ID Price Shoes"].isin(st.session_state.seleccion_ml)]
+    a1, a2, a3, a4 = st.columns([1.8, 1.1, 1.1, 1.2])
+    a1.markdown(
+        f"**🛒 Seleccionados para ML:** {len(seleccion):,} SKUs · "
+        f"{int((seleccion['Semáforo'] != RECOMENDADO).sum())} con observaciones"
     )
-    if not df_auditados.empty:
-        df_ord_ts = df_auditados.sort_values(
-            by=["stock_actual", "num_lecturas"], ascending=[False, False]
-        )
-        sku_sel_ts = st.selectbox(
-            "Selecciona un SKU auditado:", options=df_ord_ts["id_ps"].tolist()
-        )
-        fila_sku = df_auditados[df_auditados["id_ps"] == sku_sel_ts].iloc[0]
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Stock Actual Real", f"{int(fila_sku['stock_actual'])} u.")
-        m2.metric(
-            "Reserva Dinámica 24h", f"{int(fila_sku['reserva_dinamica_24h'])} u."
-        )
-        m3.metric(
-            "Stock Publicable MeLi", f"{int(fila_sku['stock_publicable_meli'])} u."
-        )
-        m4.metric(
-            "Autonomía Estimada", f"{float(fila_sku['horas_autonomia']):.1f} horas"
-        )
-
-        if (
-            not df_bitacora.empty
-            and "id_ps" in df_bitacora.columns
-            and "_stk" in df_bitacora.columns
-        ):
-            df_sub_b = df_bitacora[df_bitacora["id_ps"] == str(sku_sel_ts)].copy()
-            if not df_sub_b.empty:
-                eje_x = (
-                    "_ts"
-                    if "_ts" in df_sub_b.columns and df_sub_b["_ts"].notna().any()
-                    else df_sub_b.index
-                )
-                fig_b = px.line(
-                    df_sub_b,
-                    x=eje_x,
-                    y="_stk",
-                    markers=True,
-                    title=f"Historial Real de Lecturas · SKU {sku_sel_ts} ({fila_sku['nombre_modelo']})",
-                )
-                fig_b.add_hline(
-                    y=float(fila_sku["reserva_dinamica_24h"]),
-                    line_dash="dash",
-                    line_color="#EF4444",
-                    annotation_text="Reserva Anti-Quiebre 24h",
-                )
-                fig_b.update_layout(template="plotly_dark", height=360)
-                st.plotly_chart(fig_b, use_container_width=True)
-
-
-# ==============================================================================
-# TAB 6: TABLA DE PRECIOS Y SUCURSALES
-# ==============================================================================
-with tab6:
-    st.subheader("💵 Tabla de Precios, Sucursales y Tallas Disponibles")
-    st.dataframe(
-        df_auditados[
-            [
-                "id_ps",
-                "catalogo_origen",
-                "marca",
-                "¿Permitida en MeLi?",
-                "nombre_modelo",
-                "tallas_detalle",
-                "stock_vallejo",
-                "stock_olivar",
-                "stock_arco_norte",
-                "stock_actual",
-                "reserva_dinamica_24h",
-                "stock_publicable_meli",
-                "Precio Compra",
-                "Precio Venta Sugerido",
-                "Ganancia Libre ($)",
-                "accion_meli",
-            ]
-        ],
+    a2.download_button(
+        "⬇️ Descargar selección (CSV)",
+        data=seleccion.drop(columns=["_num_fotos", "_subir_src", "_revisado"]).to_csv(index=False).encode("utf-8-sig"),
+        file_name="seleccion_mercadolibre.csv",
+        mime="text/csv",
+        disabled=seleccion.empty,
         use_container_width=True,
-        hide_index=True,
-        height=440,
     )
+    if a3.button("💾 Guardar selección", use_container_width=True):
+        try:
+            guardar_seleccion(st.session_state.seleccion_ml)
+            st.toast("Selección guardada en la base de datos ✅")
+        except sqlite3.Error as e:
+            st.error(f"No se pudo guardar la selección: {e}")
+
+    if a4.button("📦 Exportar CSVs por Tipo (ML)", type="primary", use_container_width=True, disabled=seleccion.empty):
+        with closing(inv.conectar(RUTA_BD)) as conn:
+            inv.asegurar_esquema(conn)
+            exp_ml.asegurar_tabla_publicaciones(conn)
+            resumen = exp_ml.exportar(
+                conn,
+                exp_ml.DIR_EXPORTES,
+                exp_ml.RESERVA_POR_TALLA_DEFAULT,
+                exp_ml.ACCION_PAUSAR,
+            )
+        st.success(
+            f"✅ Exportación generada en `{resumen['carpeta']}` · "
+            f"Nuevas: {len(resumen['ids_nuevas'])} productos · Omitidos: {resumen['omitidos']} · "
+            f"Archivos: {', '.join(resumen['archivos'].keys()) or 'ninguno'}"
+        )
 
 
-# ==============================================================================
-# TAB 7: PLANIFICADOR DOBLE CARRIL Y BITÁCORA
-# ==============================================================================
-with tab7:
-    st.subheader(
-        "⏱️ Planificador de Doble Carril (Próxima Corrida GitHub Actions) y Bitácora"
+def _mostrar_galeria(df: pd.DataFrame, firma: Tuple[float, ...]) -> None:
+    st.subheader("📸 Galería de Fotografías HD")
+
+    mapa_fotos = indexar_carpetas_fotos(firma)
+    df_fotos = df[df["_num_fotos"] > 0]
+
+    if df_fotos.empty:
+        st.info(
+            "Aún no hay carruseles generados para los SKUs de este filtro. "
+            "Ejecuta `python paso6_estudio_fotografico.py` para generar sus 4 láminas HD."
+        )
+        return
+
+    filas = df_fotos.set_index("ID Price Shoes")
+    id_sel = st.selectbox(
+        "Selecciona un producto para inspeccionar sus 4 láminas HD:",
+        options=list(filas.index),
+        format_func=lambda i: f"{i} · {filas.loc[i, 'Modelo']} ({filas.loc[i, 'Cuadrante']})",
     )
-    carril_a_prox, carril_b_prox = seleccionar_lote_doble_carril(df_maestro)
+    fila = filas.loc[id_sel]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Costo", f"${fila['Costo ($)']:,.0f}")
+    m2.metric("Precio sugerido", f"${fila['Precio Sugerido']:,.0f}")
+    m3.metric("Ganancia neta", f"${fila['Ganancia Neta']:,.2f}", f"{fila['Margen (%)']:.1f}%")
+    m4.metric("Stock", f"{int(fila['Stock Publicable'])} pares")
 
-    c_ca, c_cb = st.columns(2)
-    with c_ca:
-        st.markdown(
-            f"##### 🛡️ Carril A: Vigilancia 24h Top MeLi ({len(carril_a_prox)} SKUs)"
+    laminas = mapa_fotos.get(id_sel) or mapa_fotos.get(f"PS-{id_sel}") or []
+    columnas_img = st.columns(4)
+    for i, col in enumerate(columnas_img):
+        with col:
+            if i < len(laminas) and laminas[i].exists():
+                st.image(str(laminas[i]), caption=ETIQUETAS_LAMINAS[i], use_container_width=True)
+            else:
+                st.warning(f"Falta lámina {i + 1}: {ETIQUETAS_LAMINAS[i]}")
+
+
+def _preparar_datos_de_tienda(df_cargado: pd.DataFrame) -> Tuple[pd.DataFrame, int, str]:
+    tienda_id, tienda_nombre, umbral_pausa = configurar_tienda()
+    df_cargado = aplicar_inventario_tienda(df_cargado, tienda_id)
+    st.caption(
+        f"Tienda: **{tienda_nombre}** · {int(df_cargado['_revisado'].sum()):,} productos con existencias revisadas."
+    )
+    mostrar_alertas(tienda_id, tienda_nombre, umbral_pausa)
+
+    with st.sidebar.expander("⚙️ Criterios del semáforo", expanded=False):
+        min_stock = st.number_input("Stock mínimo para recomendar", 0, 500, STOCK_MIN_DEFAULT, 1)
+        min_ganancia = st.number_input("Ganancia neta mínima ($)", 0.0, 5000.0, GANANCIA_MIN_DEFAULT, 10.0)
+    return evaluar_semaforo(df_cargado, int(min_stock), float(min_ganancia)), tienda_id, tienda_nombre
+
+
+def renderizar_panel() -> None:
+    st.title("👟 Zapatería Vallejo · Centro de Control e Inventario")
+
+    firma = firma_fuentes()
+    df_cargado = cargar_datos_inventario(firma)
+
+    if df_cargado.empty:
+        st.warning(
+            "⚠️ Aún no se encontraron artículos con costo auditado en `data/zapateria_vallejo.db` "
+            "o carpetas en `data/catalogo_listo`. Ejecuta primero `python pipeline_catalogo.py`."
         )
-        st.dataframe(
-            df_maestro[df_maestro["id_ps"].isin(carril_a_prox)][
-                [
-                    "id_ps",
-                    "nombre_modelo",
-                    "stock_actual",
-                    "horas_autonomia",
-                    "ultima_lectura",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-    with c_cb:
-        st.markdown(
-            f"##### 🔄 Carril B: Barrido Semanal 8,165 IDs ({len(carril_b_prox)} SKUs)"
-        )
-        st.dataframe(
-            df_maestro[df_maestro["id_ps"].isin(carril_b_prox)][
-                ["id_ps", "nombre_modelo", "marca", "auditado_etl", "ultima_lectura"]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
+        return
+
+    inicializar_estado(df_cargado)
+    df_total, tienda_id, tienda_nombre = _preparar_datos_de_tienda(df_cargado)
+
+    _mostrar_gestos_verdes(df_total)
+    st.markdown("---")
+
+    df = aplicar_filtros(df_total)
+
+    if st.sidebar.button("🔄 Recargar datos y fotos HD", use_container_width=True):
+        st.cache_data.clear()
+        resetear_filtros()
+        st.rerun()
+
+    _mostrar_metricas(df, df_total)
+    st.markdown("---")
+
+    st.subheader("📋 Matriz de Control e Inventario")
+    if df.empty:
+        st.warning("No hay artículos que coincidan con los filtros seleccionados.")
+        return
+
+    _mostrar_matriz(df, tienda_id, tienda_nombre)
+    _mostrar_acciones_seleccion(df_total)
+    st.markdown("---")
+    _mostrar_galeria(df, firma)
+
+
+if __name__ == "__main__":
+    renderizar_panel()

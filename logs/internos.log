@@ -1,0 +1,36 @@
+2026-11-08 19:32:37,519 | ERROR    | sinergia.interno | Fallo en SKU 1340384: name 'ProductoCandidato' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\motor_etl_vallejo.py", line 1330, in ejecutar_pipeline_sinergia
+    candidato=ProductoCandidato(
+              ^^^^^^^^^^^^^^^^^
+NameError: name 'ProductoCandidato' is not defined
+2026-11-08 19:32:37,529 | ERROR    | sinergia.interno | Fallo en SKU 1312917: name 'ProductoCandidato' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\motor_etl_vallejo.py", line 1330, in ejecutar_pipeline_sinergia
+    candidato=ProductoCandidato(
+              ^^^^^^^^^^^^^^^^^
+NameError: name 'ProductoCandidato' is not defined
+2026-11-08 19:32:37,537 | ERROR    | sinergia.interno | Fallo en SKU 1338647: name 'ProductoCandidato' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\motor_etl_vallejo.py", line 1330, in ejecutar_pipeline_sinergia
+    candidato=ProductoCandidato(
+              ^^^^^^^^^^^^^^^^^
+NameError: name 'ProductoCandidato' is not defined
+2026-11-08 19:33:00,197 | ERROR    | sinergia.interno | Fallo en SKU 1340384: name 'ProductoCandidato' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\motor_etl_vallejo.py", line 1330, in ejecutar_pipeline_sinergia
+    candidato=ProductoCandidato(
+              ^^^^^^^^^^^^^^^^^
+NameError: name 'ProductoCandidato' is not defined
+2026-11-08 19:33:00,207 | ERROR    | sinergia.interno | Fallo en SKU 1312917: name 'ProductoCandidato' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\motor_etl_vallejo.py", line 1330, in ejecutar_pipeline_sinergia
+    candidato=ProductoCandidato(
+              ^^^^^^^^^^^^^^^^^
+NameError: name 'ProductoCandidato' is not defined
+2026-11-08 19:33:00,216 | ERROR    | sinergia.interno | Fallo en SKU 1338647: name 'ProductoCandidato' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Vega\Documents\Zapateria_Vallejo\motor_etl_vallejo.py", line 1330, in ejecutar_pipeline_sinergia
+    candidato=ProductoCandidato(
+              ^^^^^^^^^^^^^^^^^
+NameError: name 'ProductoCandidato' is not defined

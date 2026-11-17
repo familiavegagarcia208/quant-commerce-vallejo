@@ -1,0 +1,1560 @@
+"""
+========================================================================================
+PASO 6: ESTUDIO FOTOGRÁFICO HD (EXCLUSIVO PARA LOS 44 CATÁLOGOS PDF OFICIALES)
+========================================================================================
+Genera el carrusel comercial en 1200x1200 px (1:1 HD) únicamente para productos que
+provienen de los catálogos PDF oficiales, descartando cualquier residuo externo:
+  - 01_portada_blanca.jpg   : 1.ª foto oficial maximizada en fondo blanco puro
+  - 02_angulo_galeria.jpg   : 2.ª foto oficial extraída de Price Shoes (0° rotación)
+  - 03_ficha_beneficios.jpg : Diseño comercial de 2 columnas + chips azules de stock real
+  - 04_guia_tallas_cm.jpg   : Tabla doble columna con tallas intermedias + 3 pasos de medición
+========================================================================================
+"""
+
+from __future__ import annotations
+
+import ast
+from functools import lru_cache
+from io import BytesIO
+import json
+import random
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from curl_cffi import requests as tls_requests
+except ImportError:
+    tls_requests = None
+
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageOps, ImageStat
+
+RUTA_BD: Path = Path("data/zapateria_vallejo.db")
+DIR_CATALOGO_LISTO: Path = Path("data/catalogo_listo")
+MAX_DESCARGAS_WEB_POR_CORRIDA: int = 40
+
+
+# ======================================================================================
+# FUENTES Y HELPERS DE TEXTO
+# ======================================================================================
+@lru_cache(maxsize=64)
+def cargar_fuente(tamano: int, negrita: bool = False):
+    rutas = (
+        [
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/calibrib.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        ]
+        if negrita
+        else [
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibri.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+    )
+    for r in rutas:
+        if Path(r).exists():
+            try:
+                return ImageFont.truetype(r, tamano)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
+def ajustar_fuente(draw, texto, ancho_max, tam_max, tam_min=11, negrita=False):
+    """Devuelve la fuente más grande (entre tam_max y tam_min) con la que el texto cabe en ancho_max."""
+    for tam in range(tam_max, tam_min - 1, -1):
+        f = cargar_fuente(tam, negrita)
+        if draw.textlength(texto, font=f) <= ancho_max:
+            return f
+    return cargar_fuente(tam_min, negrita)
+
+
+def envolver_texto(draw, texto, fuente, ancho_max):
+    lineas, actual = [], ""
+    for pal in texto.split():
+        prueba = f"{actual} {pal}".strip()
+        if not actual or draw.textlength(prueba, font=fuente) <= ancho_max:
+            actual = prueba
+        else:
+            lineas.append(actual)
+            actual = pal
+    if actual:
+        lineas.append(actual)
+    return lineas
+
+
+def envolver_ajustado(draw, texto, ancho_max, max_lineas, tam_max, tam_min=13, negrita=False):
+    f, lineas, tam = cargar_fuente(tam_min, negrita), [texto], tam_min
+    for tam in range(tam_max, tam_min - 1, -1):
+        f = cargar_fuente(tam, negrita)
+        lineas = envolver_texto(draw, texto, f, ancho_max)
+        if len(lineas) <= max_lineas:
+            return f, lineas, tam
+    return f, lineas[:max_lineas], tam_min
+
+
+def texto_centrado(draw, x0, x1, y, texto, fuente, fill):
+    w = draw.textlength(texto, font=fuente)
+    draw.text((x0 + (x1 - x0 - w) / 2, y), texto, fill=fill, font=fuente)
+
+
+# ======================================================================================
+# LIMPIEZA DE TÍTULOS E IMÁGENES
+# ======================================================================================
+def limpiar_titulo(nombre: str) -> str:
+    limpio = re.sub(r"\b(caja|env[ií]o\s*hoy|sku|id|ps)\b", "", str(nombre), flags=re.IGNORECASE)
+    limpio = re.sub(r"\b\d{5,8}\b", "", limpio)
+    limpio = re.sub(r"\bcu\s+a\b", "Cuña", limpio, flags=re.IGNORECASE)
+    limpio = re.sub(r"\bni\s+a\b", "Niña", limpio, flags=re.IGNORECASE)
+    limpio = re.sub(r"\bni\s+o\b", "Niño", limpio, flags=re.IGNORECASE)
+    limpio = re.sub(r"\s{2,}", " ", limpio).strip(" -·•|_")
+    return limpio if limpio else "Calzado Selección Oficial"
+
+
+def recortar_espacio_blanco(img: Image.Image) -> Image.Image:
+    rgb = img.convert("RGB")
+    w, h = rgb.size
+    rgb_inner = rgb.crop((4, 4, w - 4, h - 4)) if (w > 30 and h > 30) else rgb
+    iw, ih = rgb_inner.size
+
+    esquinas = [
+        rgb_inner.getpixel((0, 0)),
+        rgb_inner.getpixel((iw - 1, 0)),
+        rgb_inner.getpixel((0, ih - 1)),
+        rgb_inner.getpixel((iw - 1, ih - 1)),
+    ]
+    bg_r = int(sorted(c[0] for c in esquinas)[2])
+    bg_g = int(sorted(c[1] for c in esquinas)[2])
+    bg_b = int(sorted(c[2] for c in esquinas)[2])
+
+    color_fondo = (bg_r, bg_g, bg_b) if min(bg_r, bg_g, bg_b) >= 210 else (255, 255, 255)
+    fondo_ref = Image.new("RGB", (iw, ih), color_fondo)
+    diff = ImageChops.difference(rgb_inner, fondo_ref).convert("L")
+    mascara = diff.point(lambda p: 255 if p > 18 else 0)
+
+    bbox = mascara.getbbox()
+    if bbox and (bbox[2] - bbox[0]) > 45 and (bbox[3] - bbox[1]) > 45:
+        if color_fondo != (255, 255, 255):
+            lienzo_limpio = Image.new("RGB", (iw, ih), (255, 255, 255))
+            mascara_suave = diff.point(lambda p: 255 if p > 12 else 0)
+            lienzo_limpio.paste(rgb_inner, (0, 0), mascara_suave)
+            return lienzo_limpio.crop(bbox)
+        return rgb_inner.crop(bbox)
+    return rgb
+
+
+def son_imagenes_iguales(img1: Image.Image, img2: Image.Image, revisar_espejo: bool = True) -> bool:
+    try:
+        c1 = ImageOps.fit(recortar_espacio_blanco(img1), (64, 64)).convert("L")
+        c2 = ImageOps.fit(recortar_espacio_blanco(img2), (64, 64)).convert("L")
+        if ImageStat.Stat(ImageChops.difference(c1, c2)).mean[0] < 11.0:
+            return True
+        if revisar_espejo:
+            c2_flip = c2.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            if ImageStat.Stat(ImageChops.difference(c1, c2_flip)).mean[0] < 11.0:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def tiene_lupa_o_rotacion_vieja(img: Image.Image) -> bool:
+    try:
+        if img.size != (1200, 1200):
+            return False
+        rgb = img.convert("RGB")
+        p1, p2 = rgb.getpixel((970, 385)), rgb.getpixel((970, 53))
+        return (p1[0] < 45 and p1[1] < 50 and p1[2] < 70) and (p2[0] < 45 and p2[1] < 50 and p2[2] < 70)
+    except Exception:
+        return False
+
+
+# ======================================================================================
+# TALLAS Y BASE DE DATOS
+# ======================================================================================
+_ORDEN_LETRAS = ["XCH", "XS", "CH", "S", "CH-M", "M", "M-G", "G", "L", "XG", "XL", "2XG", "XXL", "UNI"]
+
+
+def clave_talla(t: str):
+    try:
+        return (0, float(t), "")
+    except ValueError:
+        return (1, _ORDEN_LETRAS.index(t) if t in _ORDEN_LETRAS else 99, t)
+
+
+_VALORES_SIN_TALLAS = ("{}", "[]", "None", "null", "0")
+_PATRON_TALLAS_CSV = (
+    r"^(?:1\d|2\d|3[0-2]|X?CH|M|G|X+G|S|L|XL|UNI)(?:\.[05])?"
+    r"(?:\s*,\s*(?:1\d|2\d|3[0-2]|X?CH|M|G|X+G|S|L|XL|UNI)(?:\.[05])?)+$"
+)
+
+
+def _tallas_de_dict(d: Any) -> Optional[List[str]]:
+    """Tallas con existencia de un dict {talla: cantidad}; None si no es un dict."""
+    if not isinstance(d, dict):
+        return None
+    return [str(k).strip() for k, v in d.items() if float(v or 0) > 0]
+
+
+def _tallas_de_lista(lst: Any) -> Optional[List[str]]:
+    if not isinstance(lst, list):
+        return None
+    return [str(x).strip() for x in lst if str(x).strip()]
+
+
+def _interpretar_literal(s: str, convertir) -> Optional[List[str]]:
+    """Interpreta el texto como JSON o literal de Python y lo convierte; None si no se pudo."""
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            resultado = convertir(loader(s))
+            if resultado is not None:
+                return resultado
+        except Exception:
+            pass
+    return None
+
+
+def parsear_tallas_valor(val: Any) -> List[str]:
+    if not val:
+        return []
+    s = str(val).strip()
+    if not s or s in _VALORES_SIN_TALLAS:
+        return []
+
+    for apertura, cierre, convertir in (("{", "}", _tallas_de_dict), ("[", "]", _tallas_de_lista)):
+        if s.startswith(apertura) and s.endswith(cierre):
+            tallas = _interpretar_literal(s, convertir)
+            if tallas is not None:
+                return tallas
+
+    if re.search(_PATRON_TALLAS_CSV, s, re.IGNORECASE):
+        return [x.strip() for x in s.split(",") if x.strip()]
+    return []
+
+
+def normalizar_etiqueta_talla(t: str) -> str:
+    t_str = str(t).upper().replace("MX", "").replace("CM", "").strip()
+    m = re.match(r"^(\d+)(?:\.(\d+))?$", t_str)
+    if m:
+        return f"{int(m.group(1))}.5" if m.group(2) in ("5", "50") else f"{int(m.group(1))}.0"
+    return t_str
+
+
+def _claves_sku(valor: Any) -> Tuple[str, str]:
+    """(id tal cual sin 'PS-', id sin ceros a la izquierda)."""
+    k = str(valor).strip().replace("PS-", "")
+    return k, (k.lstrip("0") or k)
+
+
+def _columnas_tabla(conn: sqlite3.Connection, tabla: str) -> List[str]:
+    return [c[1] for c in conn.execute(f'PRAGMA table_info("{tabla}")').fetchall()]
+
+
+def _purgar_filas_sin_catalogo(conn: sqlite3.Connection) -> None:
+    """Purga de raíz cualquier fila de `zapatos_candidatos` sin catálogo PDF."""
+    if "origen_catalogo" not in _columnas_tabla(conn, "zapatos_candidatos"):
+        return
+    conn.execute(
+        """
+        DELETE FROM zapatos_candidatos
+        WHERE origen_catalogo IS NULL
+           OR TRIM(origen_catalogo) = ''
+           OR LOWER(TRIM(origen_catalogo)) IN ('none', 'null', 'nan', 'sin catálogo (web)')
+        """
+    )
+    conn.commit()
+
+
+def _leer_tallas_columna_talla(
+    conn: sqlite3.Connection, tabla: str, col_id: str, cols: List[str], tallas_por_sku: Dict[str, List[str]]
+) -> None:
+    """Tablas con una fila por talla (columna `talla`)."""
+    cond = " WHERE stock > 0 " if "stock" in cols else ""
+    for r_id, r_t in conn.execute(f'SELECT {col_id}, talla FROM "{tabla}"{cond}').fetchall():
+        t_norm = normalizar_etiqueta_talla(str(r_t))
+        for clave in _claves_sku(r_id):
+            tallas_por_sku.setdefault(clave, [])
+            if t_norm not in tallas_por_sku[clave]:
+                tallas_por_sku[clave].append(t_norm)
+
+
+def _leer_tallas_columnas_json(
+    conn: sqlite3.Connection, tabla: str, col_id: str, cols: List[str], tallas_por_sku: Dict[str, List[str]]
+) -> None:
+    """Tablas que guardan las tallas en una columna de texto (JSON, lista o CSV)."""
+    cols_j = [
+        c for c in cols
+        if any(p in c.lower() for p in ("talla", "corrida", "stock_json", "inventario")) and c.lower() != "talla"
+    ]
+    if not cols_j:
+        return
+    for fila_j in conn.execute(f'SELECT {col_id}, {", ".join(cols_j)} FROM "{tabla}"').fetchall():
+        k, k_sin = _claves_sku(fila_j[0])
+        for val_col in fila_j[1:]:
+            ext = [normalizar_etiqueta_talla(x) for x in parsear_tallas_valor(val_col)]
+            if ext:
+                tallas_por_sku[k] = ext
+                tallas_por_sku[k_sin] = ext
+
+
+def _leer_tallas_de_tabla(conn: sqlite3.Connection, tabla: str, tallas_por_sku: Dict[str, List[str]]) -> None:
+    cols = _columnas_tabla(conn, tabla)
+    col_id = next((c for c in cols if c.lower() in ("id_ps", "sku", "id_producto")), None)
+    if not col_id:
+        return
+    if "talla" in cols:
+        _leer_tallas_columna_talla(conn, tabla, col_id, cols, tallas_por_sku)
+    _leer_tallas_columnas_json(conn, tabla, col_id, cols, tallas_por_sku)
+
+
+def _reunir_tallas_por_sku(conn: sqlite3.Connection, tablas) -> Dict[str, List[str]]:
+    """Tallas disponibles de cada SKU, leídas de cualquier tabla que las tenga."""
+    tallas_por_sku: Dict[str, List[str]] = {}
+    for t_nom in tablas:
+        try:
+            _leer_tallas_de_tabla(conn, t_nom, tallas_por_sku)
+        except Exception:
+            pass
+    return tallas_por_sku
+
+
+def _leer_productos_catalogo(conn: sqlite3.Connection, tallas_por_sku: Dict[str, List[str]]) -> Dict[str, Dict[str, Any]]:
+    """Productos con catálogo PDF, indexados por su id con y sin ceros a la izquierda."""
+    cols_zc = _columnas_tabla(conn, "zapatos_candidatos")
+
+    def columna(nombre: str, default: str) -> str:
+        return nombre if nombre in cols_zc else default
+
+    c_orig = columna("origen_catalogo", "''")
+    filas = conn.execute(
+        f"SELECT id_ps, COALESCE(nombre_modelo,''), COALESCE(costo_socio,0.0), COALESCE(url_real,''), "
+        f"COALESCE({columna('marca_extraida', chr(39) * 2)},''), COALESCE({columna('material_corte', chr(39) * 2)},''), "
+        f"COALESCE({c_orig},''), COALESCE({columna('stock_total_anterior', '0')},0) "
+        f"FROM zapatos_candidatos WHERE COALESCE({c_orig}, '') != ''"
+    ).fetchall()
+
+    productos: Dict[str, Dict[str, Any]] = {}
+    for fila in filas:
+        reg = _registro_producto(fila, tallas_por_sku)
+        productos[reg["id_ps"]] = reg
+        productos[reg["id_limpio"]] = reg
+    return productos
+
+
+def _registro_producto(fila: tuple, tallas_por_sku: Dict[str, List[str]]) -> Dict[str, Any]:
+    id_ps, nombre, costo, url_r, marca, corte, origen, stock = fila
+    id_str = str(id_ps).strip()
+    id_sin = id_str.lstrip("0") or id_str
+    return {
+        "id_ps": id_str,
+        "id_limpio": id_sin,
+        "nombre": limpiar_titulo(nombre or "Calzado Selección Oficial"),
+        "costo": float(costo or 0.0),
+        "url_real": str(url_r).strip(),
+        "marca": str(marca).strip() or "CATÁLOGO OFICIAL",
+        "corte": str(corte).strip(),
+        "origen_catalogo": str(origen).strip(),
+        "stock": int(stock or 0),
+        "tallas_lista": sorted(
+            tallas_por_sku.get(id_str) or tallas_por_sku.get(id_sin) or [], key=clave_talla
+        ),
+    }
+
+
+def cargar_catalogo_sqlite() -> Dict[str, Dict[str, Any]]:
+    """
+    Carga EXCLUSIVAMENTE los productos que tienen `origen_catalogo` asignado
+    desde los 44 PDFs oficiales y descarta cualquier otro registro en SQLite.
+    """
+    if not RUTA_BD.exists():
+        return {}
+
+    conn = sqlite3.connect(RUTA_BD)
+    try:
+        tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        tiene_candidatos = "zapatos_candidatos" in tablas
+        if tiene_candidatos:
+            _purgar_filas_sin_catalogo(conn)
+        tallas_por_sku = _reunir_tallas_por_sku(conn, tablas)
+        return _leer_productos_catalogo(conn, tallas_por_sku) if tiene_candidatos else {}
+    finally:
+        conn.close()
+
+
+# ======================================================================================
+# PERFILES POR CATEGORÍA
+# ======================================================================================
+PERFILES_CATALOGO: Dict[str, Dict[str, Any]] = {
+    "perfumeria": {
+        "tipo": "perfumeria",
+        "unidad_chip": "PRESENTACIÓN",
+        "subtitulo_03": "PERFUMERÍA 100% NUEVA Y ORIGINAL  ·  SELLADA DE FÁBRICA",
+        "badge_izq_inf": "AROMA DE ALTA FIJACIÓN Y ORIGEN OFICIAL",
+        "beneficios": [
+            ("FRAGANCIA 100% NUEVA Y ORIGINAL", "Producto estrictamente original en su caja sellada con celofán de fábrica."),
+            ("EMPAQUE ANTIGOLPES REFORZADO", "Protección especial con burbuja amortiguante para un traslado 100% seguro."),
+            ("EXCELENTE FIJACIÓN Y ESTELA", "Fórmula original verificada por lote para garantizar su duración en piel."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE PRESENTACIONES Y FIJACIÓN · PERFUMERÍA",
+        "subtitulo_04": "TABLA DE EQUIVALENCIAS EN ML / OZ  ·  CONCENTRACIÓN OFICIAL",
+        "columnas_04": ("PRESENTACIÓN", "EQUIVALENCIA", "TIPO / DURACIÓN"),
+        "filas_izq": [
+            ("30 ML", "1.0 FL. OZ.", "Bolsillo / Viaje"),
+            ("50 ML", "1.7 FL. OZ.", "Estándar Compacto"),
+            ("75 ML", "2.5 FL. OZ.", "Clásico Mediano"),
+            ("100 ML", "3.4 FL. OZ.", "Tamaño Estándar"),
+        ],
+        "filas_der": [
+            ("125 ML", "4.2 FL. OZ.", "Formato Grande"),
+            ("200 ML", "6.7 FL. OZ.", "Edición Familiar"),
+            ("EDT", "Eau de Toilette", "Fijación 5 a 7 hrs"),
+            ("EDP", "Eau de Parfum", "Fijación 8 a 12 hrs"),
+        ],
+        "tallas_default": ["100 ML", "ORIGINAL", "SELLADO"],
+        "pasos_04": [
+            ("PIEL HIDRATADA", "Aplica la fragancia sobre la piel limpia e hidratada para prolongar su fijación."),
+            ("PUNTOS DE PULSO", "Atomiza a 15 cm en muñecas, cuello y detrás de las orejas sin frotar."),
+            ("CONSERVACIÓN", "Guarda el frasco en un lugar fresco y alejado de la luz solar directa."),
+        ],
+    },
+    "hogar_cocina": {
+        "tipo": "hogar_cocina",
+        "unidad_chip": "MEDIDA CM",
+        "subtitulo_03": "ARTÍCULO PARA EL HOGAR 100% NUEVO  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "MATERIALES DE ALTA DURABILIDAD Y RESISTENCIA",
+        "beneficios": [
+            ("ARTÍCULO 100% NUEVO EN CAJA", "Producto revisado pieza por pieza en su empaque original de fábrica."),
+            ("DISTRIBUCIÓN UNIFORME Y CALIDAD", "Acabados resistentes diseñados para uso doméstico diario y fácil limpieza."),
+            ("EMPAQUE PROTEGIDO DE ENVÍO", "Embalaje reforzado para que recibas tu producto intacto en casa."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE MEDIDAS Y CAPACIDADES · HOGAR Y COCINA",
+        "subtitulo_04": "TABLA DE DIMENSIONES EN CENTÍMETROS (CM)  ·  USO DOMÉSTICO",
+        "columnas_04": ("DIÁMETRO / TAM.", "CAPACIDAD APROX.", "PORCIONES / USO"),
+        "filas_izq": [
+            ("20 a 22 CM", "1.5 a 2.0 Litros", "1 a 2 Personas"),
+            ("24 a 26 CM", "2.5 a 3.5 Litros", "3 a 4 Personas"),
+            ("28 a 30 CM", "4.0 a 5.5 Litros", "4 a 6 Personas"),
+            ("32 a 34 CM", "6.0 a 8.0 Litros", "Familiar (6 a 8)"),
+        ],
+        "filas_der": [
+            ("36 a 40 CM", "9.0 a 12 Litros", "Especial / Eventos"),
+            ("INDIVIDUAL", "150 x 220 cm", "Cama Individual"),
+            ("MATRIMONIAL", "180 x 220 cm", "Cama Matrimonial"),
+            ("QUEEN / KING", "220 x 240 cm", "Cama Queen / King"),
+        ],
+        "tallas_default": ["30 CM", "34 CM", "UNITALLA"],
+        "pasos_04": [
+            ("VERIFICA EL DIÁMETRO", "En sartenes, comales y arroceras la medida en CM corresponde al diámetro superior."),
+            ("CUIDADO INICIAL", "Lava con esponja suave y agua tibia antes del primer uso para proteger el recubrimiento."),
+            ("UTENSILIOS ADECUADOS", "Utiliza palas de madera, silicón o nylon para conservar el antiadherente intacto."),
+        ],
+    },
+    "accesorios": {
+        "tipo": "accesorios",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "ACCESORIO 100% NUEVO Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "DISEÑO CÓMODO, AJUSTABLE Y DE ALTA DURABILIDAD",
+        "beneficios": [
+            ("ACCESORIO 100% NUEVO Y ORIGINAL", "Artículo con etiquetas y bordados oficiales verificado antes de empacar."),
+            ("MATERIALES DE ALTA RESISTENCIA", "Costuras reforzadas y herrajes durables para uso diario continuo."),
+            ("EMPAQUE CUIDADOSO", "Protegido para conservar su horma, visera y estructura durante el envío."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE MEDIDAS · GORRAS, BOLSAS Y ACCESORIOS (CM)",
+        "subtitulo_04": "TABLA DE EQUIVALENCIAS  ·  AJUSTE ESTÁNDAR NACIONAL",
+        "columnas_04": ("TALLA / FORMATO", "MEDIDA EN (CM)", "TIPO DE AJUSTE"),
+        "filas_izq": [
+            ("GORRA INFANTIL", "50.0 a 54.0 cm", "Broche Ajustable"),
+            ("GORRA UNITALLA", "55.0 a 60.0 cm", "Snapback / Strap"),
+            ("GORRA M / G", "57.0 a 59.5 cm", "Cerrada Elástica"),
+            ("GORRA G / XG", "60.0 a 62.5 cm", "Talla Extendida"),
+        ],
+        "filas_der": [
+            ("CINTURÓN CH/M", "75.0 a 90.0 cm", "Pantalón 28 a 32"),
+            ("CINTURÓN G/XG", "92.0 a 108 cm", "Pantalón 34 a 40"),
+            ("BOLSA / MOCHILA", "Formato Oficial", "Compartimento Amplio"),
+            ("UNITALLA (UNI)", "Medida Estándar", "Ajuste Universal"),
+        ],
+        "tallas_default": ["UNITALLA", "AJUSTABLE"],
+        "pasos_04": [
+            ("CONTORNO DE CABEZA", "Para gorras, rodea tu cabeza con cinta métrica 1 cm por encima de cejas y orejas."),
+            ("BROCHE SNAPBACK", "Los modelos 9Fifty y Unitalla cuentan con broche trasero regulable a tu medida."),
+            ("REVISA MEDIDAS", "Compara tus centímetros con la tabla superior para confirmar un ajuste cómodo."),
+        ],
+    },
+    "calcetin": {
+        "tipo": "calcetin",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "CALCETERÍA 100% NUEVA Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "TEJIDO TRANSPIRABLE, SUAVE Y ELÁSTICO",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y ORIGINAL", "Calcetería en empaque original sellado, verificada antes de ser enviada."),
+            ("AJUSTE ELÁSTICO ERGONÓMICO", "Tejido con spandex de memoria que se adapta al pie sin apretar ni deslizarse."),
+            ("FRESCURA Y TRANSPIRACIÓN", "Fibras absorbentes con costuras planas en puntera para evitar roces."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · CALCETERÍA Y TINES (MÉXICO)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  AJUSTE ELÁSTICO NACIONAL",
+        "columnas_04": ("TALLA", "PIE EN (CM)", "CALZADO MX"),
+        "filas_izq": [
+            ("INFANTIL CH", "13.0 a 15.5 cm", "13 al 15.5 MX"),
+            ("INFANTIL M", "16.0 a 18.5 cm", "16 al 18.5 MX"),
+            ("ESCOLAR G", "19.0 a 21.5 cm", "19 al 21.5 MX"),
+            ("JUVENIL", "22.0 a 23.5 cm", "22 al 23.5 MX"),
+        ],
+        "filas_der": [
+            ("UNITALLA DAMA", "23.0 a 26.0 cm", "23 al 26.0 MX"),
+            ("CABALLERO M", "25.0 a 27.0 cm", "25 al 27.0 MX"),
+            ("CABALLERO G", "27.5 a 29.5 cm", "27.5 al 29.5 MX"),
+            ("CABALLERO XG", "30.0 a 31.5 cm", "30 al 31.5 MX"),
+        ],
+        "tallas_default": ["UNI DAMA", "23-26", "25-28"],
+        "pasos_04": [
+            ("VERIFICA TU CALZADO", "Revisa el número mexicano (MX) que usas habitualmente en tus tenis o zapatos."),
+            ("UBICA EL RANGO", "Localiza tu número dentro de la columna CALZADO MX de la tabla superior."),
+            ("ELIGE CON CONFIANZA", "El tejido elástico se amolda cómodamente a todo el rango indicado."),
+        ],
+    },
+    "calzones": {
+        "tipo": "calzones",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "ROPA INTERIOR 100% NUEVA Y ORIGINAL  ·  HIGIENE GARANTIZADA",
+        "badge_izq_inf": "AJUSTE ANATÓMICO, SUAVE Y TRANSPIRABLE",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y SELLADA", "Ropa interior estrictamente nueva en su empaque de higiene original."),
+            ("ELÁSTICO SUAVE DE ALTA FIRMEZA", "Pretina y tejido de control que sujeta con suavidad sin marcar ni enrollarse."),
+            ("FRESCURA TODO EL DÍA", "Puente y fibras transpirables hipoalergénicas para máxima comodidad diaria."),
+            ("COMPRA 100% PROTEGIDA", "Envío discreto, seguro y respaldado directamente por la plataforma."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · ROPA INTERIOR, PANTIS Y FAJAS (CM)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  CINTURA Y CADERA EN CM",
+        "columnas_04": ("TALLA MX", "CINTURA (CM)", "CADERA / PANT."),
+        "filas_izq": [
+            ("XCH (XS)", "64 a 69 cm", "86-90 cm (26-28)"),
+            ("CH (S)", "70 a 75 cm", "91-95 cm (28-30)"),
+            ("CH / M", "76 a 78 cm", "96-98 cm (31)"),
+            ("M (MED)", "79 a 84 cm", "99-103 cm (32-33)"),
+        ],
+        "filas_der": [
+            ("M / G", "85 a 87 cm", "104-106 cm (34)"),
+            ("G (L)", "88 a 94 cm", "107-112 cm (36)"),
+            ("XG (XL)", "95 a 102 cm", "113-119 cm (38-40)"),
+            ("2XG (XXL)", "103 a 110 cm", "120-127 cm (42)"),
+        ],
+        "tallas_default": ["CH", "M", "G", "XG"],
+        "pasos_04": [
+            ("MIDE TU CINTURA", "Rodea tu cintura natural con una cinta métrica sin apretar la piel."),
+            ("MIDE TU CADERA", "Pasa la cinta por la parte más prominente de los glúteos y cadera."),
+            ("COMPARA EN TABLA", "Si estás entre dos medidas, elige la talla superior para mayor confort."),
+        ],
+    },
+    "chamarra_abrigador": {
+        "tipo": "chamarra_abrigador",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "PRENDA ABRIGADORA 100% NUEVA Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "DISEÑO TÉRMICO, CÓMODO Y DE ALTA DURABILIDAD",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y ORIGINAL", "Chamarra, chaleco o sudadera revisada en cierres y costuras antes de empacar."),
+            ("PROTECCIÓN Y CONFORT TÉRMICO", "Interior suave y materiales seleccionados para abrigar con total ligereza."),
+            ("CORTE MODERNO Y VERSÁTIL", "Horma pensada para llevar cómodamente sobre playeras o camisas."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · CHAMARRAS, SUDADERAS Y ABRIGO (CM)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  PECHO, HOMBRO Y LARGO",
+        "columnas_04": ("TALLA MX", "PECHO (CM)", "HOMBRO / LARGO"),
+        "filas_izq": [
+            ("XCH (XS)", "86 a 90 cm", "41 cm / 62 cm"),
+            ("CH (S)", "91 a 96 cm", "43 cm / 64 cm"),
+            ("CH-M", "97 a 99 cm", "44.5 cm / 65 cm"),
+            ("M (MED)", "100 a 105 cm", "46 cm / 67 cm"),
+        ],
+        "filas_der": [
+            ("M-G", "106 a 108 cm", "47.5 cm / 68 cm"),
+            ("G (L)", "109 a 114 cm", "49 cm / 70 cm"),
+            ("XG (XL)", "115 a 122 cm", "51 cm / 72 cm"),
+            ("2XG (XXL)", "123 a 130 cm", "53 cm / 74 cm"),
+        ],
+        "tallas_default": ["CH", "M", "G", "XG"],
+        "pasos_04": [
+            ("CONTORNO DE PECHO", "Mide alrededor del pecho con una playera puesta manteniendo la cinta horizontal."),
+            ("ESPACIO DE CAPAS", "Si planeas usar suéter grueso debajo de la chamarra, considera elegir media talla más."),
+            ("LARGO DE PRENDA", "Verifica el largo desde la base del cuello hasta la cintura o cadera según el corte."),
+        ],
+    },
+    "camisa": {
+        "tipo": "camisa",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "PRENDA 100% NUEVA Y ORIGINAL  ·  CORTE Y CONFECCIÓN OFICIAL",
+        "badge_izq_inf": "CORTE ELEGANTE, FRESCO Y DE BUENA CAÍDA",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y ORIGINAL", "Camisa con etiquetas originales, revisada en costuras y botones antes de enviar."),
+            ("ACABADO DE ALTA PRESENTACIÓN", "Cuello y puños con estructura firme que conservan su porte tras el lavado."),
+            ("COMODIDAD Y MOVIMIENTO", "Horma pensada para lucir impecable sin limitar la movilidad de brazos."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · CAMISAS EN CENTÍMETROS (MX)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  PECHO, HOMBRO Y LARGO",
+        "columnas_04": ("TALLA MX", "PECHO (CM)", "HOMBRO / LARGO"),
+        "filas_izq": [
+            ("XCH (34)", "88 a 92 cm", "42 cm / 70 cm"),
+            ("CH (36)", "93 a 97 cm", "44 cm / 72 cm"),
+            ("CH-M (37)", "98 a 100 cm", "45 cm / 73 cm"),
+            ("M (38)", "101 a 105 cm", "46 cm / 74 cm"),
+        ],
+        "filas_der": [
+            ("M-G (39)", "106 a 108 cm", "47.5 cm / 75 cm"),
+            ("G (40)", "109 a 113 cm", "49 cm / 76 cm"),
+            ("XG (42)", "114 a 119 cm", "51 cm / 78 cm"),
+            ("2XG (44)", "120 a 126 cm", "53 cm / 80 cm"),
+        ],
+        "tallas_default": ["CH", "M", "G", "XG"],
+        "pasos_04": [
+            ("CONTORNO DE PECHO", "Pasa la cinta métrica por debajo de las axilas en la parte más ancha del pecho."),
+            ("ANCHO DE HOMBROS", "Mide de costura a costura en la espalda sobre una camisa que te quede bien."),
+            ("ELIGE TU TALLA", "Compara tus centímetros en la tabla; si prefieres ajuste holgado, sube media talla."),
+        ],
+    },
+    "blusa": {
+        "tipo": "blusa",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "PRENDA 100% NUEVA Y ORIGINAL  ·  MODA OFICIAL DE CATÁLOGO",
+        "badge_izq_inf": "TEJIDO SUAVE, ESTILIZADO Y FAVORECEDOR",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y ORIGINAL", "Blusa o top verificado pieza por pieza con acabados y etiquetas de fábrica."),
+            ("CAÍDA SUAVE Y FAVORECEDORA", "Confección diseñada para estilizar la silueta con total comodidad."),
+            ("COLORES Y TEXTURA DURADERA", "Telas seleccionadas que mantienen su suavidad y tono lavado tras lavado."),
+            ("COMPRA 100% PROTEGIDA", "Respaldo directo en tu compra y empaque cuidadoso de alta protección."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · BLUSAS, TOPS Y VESTIDOS DAMA (CM)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  BUSTO Y CINTURA EN CM",
+        "columnas_04": ("TALLA MX", "BUSTO (CM)", "CINTURA / LARGO"),
+        "filas_izq": [
+            ("XCH (26)", "82 a 85 cm", "64-67 cm / 59 cm"),
+            ("CH (28-30)", "86 a 90 cm", "68-72 cm / 61 cm"),
+            ("CH-M (31)", "91 a 93 cm", "73-75 cm / 62 cm"),
+            ("M (32-34)", "94 a 98 cm", "76-80 cm / 63 cm"),
+        ],
+        "filas_der": [
+            ("M-G (35)", "99 a 101 cm", "81-83 cm / 64 cm"),
+            ("G (36-38)", "102 a 107 cm", "84-89 cm / 65 cm"),
+            ("XG (40)", "108 a 114 cm", "90-96 cm / 67 cm"),
+            ("2XG (42)", "115 a 121 cm", "97-103 cm / 69 cm"),
+        ],
+        "tallas_default": ["CH", "M", "G", "XG"],
+        "pasos_04": [
+            ("MIDE TU BUSTO", "Rodea la parte más amplia del busto con una cinta métrica manteniendo la espalda recta."),
+            ("MIDE TU CINTURA", "Toma la medida alrededor de la parte más estrecha del torso sin apretar."),
+            ("UBICA TU TALLA", "Verifica la equivalencia en número (28 a 42) o letra (CH a 2XG) en la tabla."),
+        ],
+    },
+    "playera": {
+        "tipo": "playera",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "PRENDA 100% NUEVA Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "TEJIDO TRANSPIRABLE, CÓMODO Y RESISTENTE",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y ORIGINAL", "Artículo estrictamente nuevo con etiquetas oficiales, revisado antes de empacar."),
+            ("FRESCURA Y SUAVIDAD AL TACTO", "Tejido cómodo y ligero pensado para uso diario sin irritaciones."),
+            ("COSTURAS Y COLOR DE ALTA FIJACIÓN", "Mantiene su ajuste y color original tras múltiples ciclos de lavado."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · PLAYERAS, POLOS Y PIJAMAS (CM)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  CONTORNO DE PECHO Y LARGO",
+        "columnas_04": ("TALLA MX", "PECHO (CM)", "ANCHO / LARGO"),
+        "filas_izq": [
+            ("XCH (XS)", "84 a 88 cm", "45 cm / 66 cm"),
+            ("CH (S)", "89 a 94 cm", "48 cm / 68 cm"),
+            ("CH-M", "95 a 97 cm", "50 cm / 69.5 cm"),
+            ("M (MED)", "98 a 103 cm", "52 cm / 71 cm"),
+        ],
+        "filas_der": [
+            ("M-G", "104 a 106 cm", "54 cm / 72.5 cm"),
+            ("G (L)", "107 a 112 cm", "56 cm / 74 cm"),
+            ("XG (XL)", "113 a 119 cm", "60 cm / 76 cm"),
+            ("2XG (XXL)", "120 a 127 cm", "64 cm / 78 cm"),
+        ],
+        "tallas_default": ["CH", "M", "G", "XG"],
+        "pasos_04": [
+            ("CONTORNO DE PECHO", "Mide alrededor del pecho a la altura de las axilas con la cinta horizontal."),
+            ("COMPARA UNA PRENDA", "O extiende tu playera favorita en una mesa y mide de axila a axila (ANCHO)."),
+            ("ELIGE TU AJUSTE", "Usa la tabla superior; para un estilo más relajado (oversize) elige una talla más."),
+        ],
+    },
+    "pantalon": {
+        "tipo": "pantalon",
+        "unidad_chip": "TALLA MX",
+        "subtitulo_03": "PRENDA 100% NUEVA Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "CORTE ERGONÓMICO, CÓMODO Y RESISTENTE",
+        "beneficios": [
+            ("PRENDA 100% NUEVA Y ORIGINAL", "Revisada en cierres, botones y costuras antes de ser empaquetada."),
+            ("AJUSTE FAVORECEDOR Y CÓMODO", "Horma nacional que brinda libertad de movimiento durante todo el día."),
+            ("TELA DE ALTA RESISTENCIA", "Tejido duradero que conserva su forma sin aflojarse con el uso."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS · PANTALONES Y JEANS EN CM (MX)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  CINTURA Y CADERA EN CM",
+        "columnas_04": ("TALLA MX", "CINTURA (CM)", "CADERA (CM)"),
+        "filas_izq": [
+            ("28 (5 Dama)", "68 a 71 cm", "90 a 94 cm"),
+            ("30 (7 Dama)", "72 a 75 cm", "95 a 98 cm"),
+            ("31 (9 Dama)", "76 a 78 cm", "99 a 101 cm"),
+            ("32 (11 Dama)", "79 a 82 cm", "102 a 105 cm"),
+        ],
+        "filas_der": [
+            ("33 (12 Dama)", "83 a 85 cm", "106 a 108 cm"),
+            ("34 (13 Dama)", "86 a 89 cm", "109 a 112 cm"),
+            ("36 (15 Dama)", "90 a 94 cm", "113 a 117 cm"),
+            ("38 (17 Dama)", "95 a 100 cm", "118 a 123 cm"),
+        ],
+        "tallas_default": ["28", "30", "32", "34"],
+        "pasos_04": [
+            ("MIDE TU CINTURA", "Rodea tu cintura a la altura donde sueles usar el pantalón con cinta métrica."),
+            ("MIDE TU CADERA", "Toma el contorno de la parte más amplia de tu cadera con los pies juntos."),
+            ("REVISA EQUIVALENCIA", "Ubica tu medida en centímetros para elegir tu talla exacta en México."),
+        ],
+    },
+    "calzado_infantil": {
+        "tipo": "calzado_infantil",
+        "unidad_chip": "CM MX",
+        "subtitulo_03": "CALZADO 100% NUEVO Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "DISEÑO CÓMODO, LIGERO Y RESISTENTE",
+        "beneficios": [
+            ("CALZADO 100% NUEVO Y ORIGINAL", "Calzado de calidad estrictamente nueva, verificado par por par antes de ser empaquetado."),
+            ("EMPAQUE DE ALTA PROTECCIÓN", "Protegido cuidadosamente con material de alta resistencia para un traslado impecable."),
+            ("MÁXIMA COMODIDAD DIARIA", "Plantilla suave y suela antiderrapante diseñada para brindar confort en el colegio y recreo."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa de inmediato, seguro y respaldado por la plataforma."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS EN CENTÍMETROS · INFANTIL / ESCOLAR",
+        "subtitulo_04": "TABLA COMPLETA CON MEDIOS NÚMEROS  ·  HORMA NACIONAL EXACTA",
+        "columnas_04": ("TALLA MX", "TU PIE (CM)", "PLANTILLA"),
+        "filas_izq": [
+            ("15.0 MX", "14.7 a 15.0 cm", "15.3 cm"),
+            ("15.5 MX", "15.1 a 15.5 cm", "15.8 cm"),
+            ("16.0 MX", "15.7 a 16.0 cm", "16.3 cm"),
+            ("16.5 MX", "16.1 a 16.5 cm", "16.8 cm"),
+            ("17.0 MX", "16.7 a 17.0 cm", "17.3 cm"),
+            ("17.5 MX", "17.1 a 17.5 cm", "17.8 cm"),
+            ("18.0 MX", "17.7 a 18.0 cm", "18.3 cm"),
+            ("18.5 MX", "18.1 a 18.5 cm", "18.8 cm"),
+        ],
+        "filas_der": [
+            ("19.0 MX", "18.7 a 19.0 cm", "19.3 cm"),
+            ("19.5 MX", "19.1 a 19.5 cm", "19.8 cm"),
+            ("20.0 MX", "19.7 a 20.0 cm", "20.3 cm"),
+            ("20.5 MX", "20.1 a 20.5 cm", "20.8 cm"),
+            ("21.0 MX", "20.7 a 21.0 cm", "21.3 cm"),
+            ("21.5 MX", "21.1 a 21.5 cm", "21.8 cm"),
+            ("22.0 MX", "21.7 a 22.0 cm", "22.3 cm"),
+            ("22.5 MX", "22.1 a 22.5 cm", "22.8 cm"),
+        ],
+        "tallas_default": ["18.0", "19.0", "20.0", "21.0"],
+        "pasos_04": [
+            ("APOYA EL TALÓN", "Coloca una hoja de papel en el piso pegada a la pared y pon el pie con el talón tocando la pared."),
+            ("HAZ UNA MARCA", "Con un lápiz vertical, traza una pequeña línea justo donde termina el dedo más largo."),
+            ("MIDE CON REGLA", "Mide la distancia del borde de la hoja a la marca: esos centímetros son tu talla MX."),
+        ],
+    },
+    "calzado_adulto": {
+        "tipo": "calzado_adulto",
+        "unidad_chip": "CM MX",
+        "subtitulo_03": "CALZADO 100% NUEVO Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "DISEÑO CÓMODO, LIGERO Y RESISTENTE",
+        "beneficios": [
+            ("CALZADO 100% NUEVO Y ORIGINAL", "Calzado de calidad estrictamente nueva, verificado par por par antes de ser empaquetado."),
+            ("EMPAQUE DE ALTA PROTECCIÓN", "Protegido cuidadosamente con material de alta resistencia para un traslado impecable."),
+            ("MÁXIMA COMODIDAD DIARIA", "Plantilla suave y horma ergonómica diseñada para brindar confort por largas jornadas."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa de inmediato, seguro y respaldado por la plataforma."),
+        ],
+        "titulo_04": "GUÍA DE TALLAS EN CENTÍMETROS (MÉXICO)",
+        "subtitulo_04": "TABLA COMPLETA DE EQUIVALENCIAS  ·  HORMA NACIONAL EXACTA",
+        "columnas_04": ("TALLA MX", "TU PIE (CM)", "PLANTILLA"),
+        "filas_izq": [
+            ("21.5 MX", "21.2 a 21.5 cm", "21.8 cm"),
+            ("22.0 MX", "21.7 a 22.0 cm", "22.3 cm"),
+            ("22.5 MX", "22.1 a 22.5 cm", "22.8 cm"),
+            ("23.0 MX", "22.6 a 23.0 cm", "23.3 cm"),
+            ("23.5 MX", "23.1 a 23.5 cm", "23.8 cm"),
+            ("24.0 MX", "23.6 a 24.0 cm", "24.3 cm"),
+            ("24.5 MX", "24.1 a 24.5 cm", "24.8 cm"),
+            ("25.0 MX", "24.6 a 25.0 cm", "25.3 cm"),
+        ],
+        "filas_der": [
+            ("25.5 MX", "25.1 a 25.5 cm", "25.8 cm"),
+            ("26.0 MX", "25.6 a 26.0 cm", "26.3 cm"),
+            ("26.5 MX", "26.1 a 26.5 cm", "26.8 cm"),
+            ("27.0 MX", "26.6 a 27.0 cm", "27.3 cm"),
+            ("27.5 MX", "27.1 a 27.5 cm", "27.8 cm"),
+            ("28.0 MX", "27.6 a 28.0 cm", "28.3 cm"),
+            ("28.5 MX", "28.1 a 28.5 cm", "28.8 cm"),
+            ("29.0 MX", "28.6 a 29.0 cm", "29.3 cm"),
+        ],
+        "tallas_default": ["23.5", "24.5", "25.0"],
+        "pasos_04": [
+            ("APOYA EL TALÓN", "Coloca una hoja de papel en el piso pegada a la pared y pon tu pie con el talón tocando la pared."),
+            ("HAZ UNA MARCA", "Con un lápiz vertical, traza una pequeña línea justo donde termina tu dedo más largo."),
+            ("MIDE CON REGLA", "Mide la distancia del borde de la hoja a la marca: esos centímetros son tu talla MX."),
+        ],
+    },
+}
+
+
+# ======================================================================================
+# CLASIFICADOR DE CATEGORÍAS
+# ======================================================================================
+RE_CALZADO = re.compile(
+    r"\b(zapato|zapatos|tenis|mocas[ií]n|mocasines|choclo|choclos|top\s*sider|bot[ií]n|botines|bota|botas|"
+    r"sandalia|sandalias|zapatilla|zapatillas|loafer|hiker|calzado|chancla|chanclas|huarache|huaraches|"
+    r"pantufla|pantuflas|balerina|balerinas|cu[ñn]a|cu\s+a)\b",
+    re.I,
+)
+RE_NO_CALZADO = re.compile(
+    r"\b(pantal[oó]n|pantalones|jeans|mezclilla|calcet[ií]n|calcetines|calceta|calcetas|tines?|medias|"
+    r"mochila|bolsa|gorra|playera|camisa|chamarra|sudadera|short|shorts|legging|leggings|perfume)\b",
+    re.I,
+)
+RE_INFANTIL_CALZADO = re.compile(
+    r"\b(escolar|ni[ñn][oa]s?|infantil|beb[eé]|junior|jr|kids|bluey|spiderman|paw\s*patrol|kuromi|sonic|mickey|minnie|"
+    r"stitch|avengers|disney|luces|colegial|k\s*pop|woody|frozen|barbie|batman|mario|pokemon|peppa|princesas|cars|"
+    r"toy\s*story|hello\s*kitty|minions)\b",
+    re.I,
+)
+
+
+RE_INFANTIL_GENERICO = re.compile(
+    r"\b(escolar|ni[ñn][oa]s?|infantil|beb[eé]|junior|jr|kids|bluey|spiderman|paw\s*patrol|kuromi|sonic|mickey|minnie|"
+    r"stitch|avengers|disney|luces|colegial|k\s*pop|woody)\b"
+)
+
+# Reglas en orden de prioridad: (clave en PERFILES_CATALOGO, patrón sobre nombre + marca + corte + catálogo)
+REGLAS_PERFIL_NO_CALZADO: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    # 1. Perfumería
+    ("perfumeria", re.compile(
+        r"\b(perfume|perfumes|fragancia|fragancias|locion|loci[oó]n|eau\s*de|colonia|body\s*mist|desodorante|cosmetico|cosm[eé]tico|maquillaje|labial|crema\s*corporal|shampoo|limpiador)\b"
+    )),
+    # 2. Hogar y cocina
+    ("hogar_cocina", re.compile(
+        r"\b(arrocera|comal|sart[eé]n|sartenes|olla|ollas|cacerola|bater[ií]a\s*de\s*cocina|licuadora|cafetera|termo|vajilla|utensilio|cobertor|edred[oó]n|s[aá]bana|sabanas|frazada|almohada|coj[ií]n|toalla|mantel|cortina|tapete|hogar)\b"
+    )),
+    # 3. Gorras, bolsas y accesorios
+    ("accesorios", re.compile(
+        r"\b(gorra|gorras|gorro|sombrero|visera|snapback|mochila|mochilas|bolsa|bolsas|bolso|cartera|cangurera|mariconera|maleta|lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes)\b"
+    )),
+    # 4. Calcetería
+    ("calcetin", re.compile(
+        r"\b(calcet[ií]n|calcetines|calceta|calcetas|tin|tines|medias|tobimedias?|media(?!\s+(?:manga|ca[ñn]a|suela|tac[oó]n)))\b"
+    )),
+    # 5. Ropa interior
+    ("calzones", re.compile(
+        r"\b(calz[oó]n|calzones|boxer|b[oó]xer|boxers|b[oó]xers|trusa|trusas|bikini|bikinis|tanga|tangas|cachetero|cacheteros|hipkini|panty|panti|pantis|pantys|faja|fajas|control\s*abdomen|body\s*control|ropa\s*interior|lencer[ií]a|brasier|bra|bralette|top\s*interior|corpi[ñn]o|camiseta\s*interior)\b"
+    )),
+    # 6. Chamarras y abrigadores
+    ("chamarra_abrigador", re.compile(
+        r"\b(chamarra|chamarras|chaleco|chalecos|abrigo|abrigos|capa|capas|poncho|gabardina|rompevientos|parka|bomber|torera|saco|blazer|cardigan|c[aá]rdigan|su[eé]ter|sueteres|sudadera|sudaderas|hoodie|polar|abrigador)\b"
+    )),
+    # 7. Camisas
+    ("camisa", re.compile(r"\b(camisa|camisas|guayabera|guayaberas|sobrecamisa)\b")),
+    # 8. Blusas y vestidos
+    ("blusa", re.compile(
+        r"\b(blusa|blusas|blus[oó]n|camisera\s*dama|crop\s*top|top\s*seamless|top\s*deportivo|top\s*dama|vestido|vestidos|enterizo|jumpsuit|palazzo)\b"
+    )),
+    # 9. Playeras, polos y pijamas
+    ("playera", re.compile(
+        r"\b(playera|playeras|polo|t-shirt|jersey|pijama|pijamas|lounge|camis[oó]n|camiseta|camisetas|tank\s*top|esqueleto|bata|conjunto)\b"
+    )),
+    # 10. Pantalones y similares
+    ("pantalon", re.compile(
+        r"\b(pantal[oó]n|pantalones|jeans|mezclilla|skinny|superskinny|short|shorts|bermuda|bermudas|falda|faldas|legging|leggings|mall[oó]n|jogger|joggers|pants|capri)\b"
+    )),
+)
+
+
+def _perfil_calzado(texto: str, tallas_num: List[float], patron_infantil: "re.Pattern[str]") -> Dict[str, Any]:
+    """Calzado infantil si el texto lo indica o si todas las tallas son de niño; si no, adulto."""
+    es_infantil = bool(patron_infantil.search(texto)) or bool(tallas_num and max(tallas_num) <= 22.0)
+    return PERFILES_CATALOGO["calzado_infantil"] if es_infantil else PERFILES_CATALOGO["calzado_adulto"]
+
+
+def detectar_perfil_prenda(
+    nombre: str, marca: str, corte: str, tallas_bd: List[str], origen_catalogo: str = ""
+) -> Dict[str, Any]:
+    texto_nombre = nombre.lower()
+    texto = f"{nombre} {marca} {corte} {origen_catalogo}".lower()
+    tallas_num = [
+        float(m.group(1))
+        for t in tallas_bd
+        if (m := re.match(r"^(\d+(?:\.\d+)?)$", str(t).strip())) and 10.0 <= float(m.group(1)) <= 33.0
+    ]
+
+    # 0. Calzado explícito en el título (y que no sea prenda/accesorio: "Pantalón Bota", "Calcetín para tenis")
+    if RE_CALZADO.search(texto_nombre) and not RE_NO_CALZADO.search(texto_nombre):
+        return _perfil_calzado(texto, tallas_num, RE_INFANTIL_CALZADO)
+
+    # 1-10. Prendas, accesorios y artículos que no son calzado
+    for clave_perfil, patron in REGLAS_PERFIL_NO_CALZADO:
+        if patron.search(texto):
+            return PERFILES_CATALOGO[clave_perfil]
+
+    # 11. Calzado infantil o adulto por defecto
+    return _perfil_calzado(texto, tallas_num, RE_INFANTIL_GENERICO)
+
+
+# ======================================================================================
+# DESCARGA DE FOTOS
+# ======================================================================================
+def http_get_bytes(url: str, timeout: int = 14, con_texto: bool = True) -> Tuple[int, bytes, str]:
+    if tls_requests is not None:
+        for nav in ("chrome120", "chrome110", "safari15_5"):
+            try:
+                r = tls_requests.get(url, impersonate=nav, timeout=timeout)
+                if r.status_code == 200:
+                    return r.status_code, r.content, (r.text if con_texto else "")
+            except Exception:
+                continue
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,image/avif,image/webp,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return getattr(resp, "status", 200), raw, (raw.decode("utf-8", errors="ignore") if con_texto else "")
+    except Exception:
+        return 0, b"", ""
+
+
+def generar_variantes_cdn_segunda_foto(url_primera: str, id_limpio: str) -> List[str]:
+    variantes: List[str] = []
+    if not url_primera:
+        return variantes
+    base, sep, query = url_primera.partition("?")
+    suf_q = f"{sep}{query}" if sep else ""
+    reemplazos = [
+        (rf"({id_limpio})([_\-])1(\.[a-zA-Z]+)$", r"\1\g<2>2\3"),
+        (rf"({id_limpio})([_\-])1(\.[a-zA-Z]+)$", r"\1\g<2>3\3"),
+        (rf"({id_limpio})([_\-])01(\.[a-zA-Z]+)$", r"\1\g<2>02\3"),
+        (rf"({id_limpio})([_\-]?)[aA](\.[a-zA-Z]+)$", r"\1\g<2>b\3"),
+        (rf"({id_limpio})(\.[a-zA-Z]+)$", r"\1_2\2"),
+        (rf"({id_limpio})(\.[a-zA-Z]+)$", r"\1-2\2"),
+        (r"([_\-])1(\.[a-zA-Z]+)$", r"\g<1>2\2"),
+        (r"([_\-])01(\.[a-zA-Z]+)$", r"\g<1>02\2"),
+    ]
+    for pat, sust in reemplazos:
+        nueva = re.sub(pat, sust, base)
+        if nueva != base and f"{nueva}{suf_q}" not in variantes:
+            variantes.append(f"{nueva}{suf_q}")
+    return variantes
+
+
+def extraer_urls_galeria_html(html: str, id_limpio: str) -> List[str]:
+    candidatas: List[str] = []
+
+    def agregar(u: str) -> None:
+        ul = u.strip().replace("\\/", "/").replace("\\u002F", "/").replace("&amp;", "&")
+        if not ul.startswith("http"):
+            return
+        low = ul.lower()
+        if any(b in low for b in ("logo", "icon", "avatar", "banner", "placeholder", ".svg", "favicon", "spinner", "thumb_")):
+            return
+        if re.search(r"(?<!\d)(?:50|100)x(?:\d|\b)", low):  # miniaturas reales, no 750x750 / 1100x1100
+            return
+        if ul not in candidatas:
+            candidatas.append(ul)
+
+    for b_ld in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.I | re.S):
+        for m in re.findall(r'https?:\\?/\\?/[^"\'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s<>]*)?', b_ld, re.I):
+            agregar(m)
+
+    m_next = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.I | re.S)
+    if m_next:
+        for m in re.findall(r'https?:\\?/\\?/[^"\'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s<>]*)?', m_next.group(1), re.I):
+            agregar(m)
+
+    for m_og in re.findall(r"<meta[^>]+og:image[^>]+>", html, re.I):
+        if m_c := re.search(r'content=["\'](https?://[^"\']+)["\']', m_og, re.I):
+            agregar(m_c.group(1))
+
+    for m_id in re.findall(
+        rf'https?:\\?/\\?/[^"\'\s<>]*?{id_limpio}[^"\'\s<>]*?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s<>]*)?', html, re.I
+    ):
+        agregar(m_id)
+
+    if candidatas:
+        dir_cdn = candidatas[0].rsplit("/", 1)[0]
+        if len(dir_cdn) > 25:
+            for m_dir in re.findall(
+                re.escape(dir_cdn) + r'/[^"\'\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s<>]*)?', html, re.I
+            ):
+                agregar(m_dir)
+
+    for u_base in list(candidatas[:3]):
+        for u_var in generar_variantes_cdn_segunda_foto(u_base, id_limpio):
+            agregar(u_var)
+
+    return candidatas
+
+
+def _bajar_imagen(url: str) -> Optional[Image.Image]:
+    st, raw, _ = http_get_bytes(url, timeout=12, con_texto=False)
+    if st != 200 or len(raw) <= 4000:
+        return None
+    try:
+        return Image.open(BytesIO(raw)).convert("RGB")
+    except Exception:
+        return None
+
+
+def descargar_fotos_oficiales_ps(
+    id_limpio: str, url_real: str, img_01_existente: Optional[Image.Image] = None
+) -> List[Image.Image]:
+    imagenes: List[Image.Image] = [img_01_existente] if img_01_existente is not None else []
+    urls_vistas: set[str] = set()
+    url_ficha = url_real.strip()
+
+    def procesar_html(html: str) -> bool:
+        for u_img in extraer_urls_galeria_html(html, id_limpio):
+            if u_img in urls_vistas:
+                continue
+            urls_vistas.add(u_img)
+            im = _bajar_imagen(u_img)
+            if im is not None and not any(son_imagenes_iguales(im, ex, revisar_espejo=False) for ex in imagenes):
+                imagenes.append(im)
+            if len(imagenes) >= 2:
+                return True
+        return False
+
+    try:
+        time.sleep(random.uniform(1.8, 3.2))
+        if not url_ficha or "/productos/" not in url_ficha:
+            st_b, _, html_b = http_get_bytes(f"https://www.priceshoes.com/buscar?q={id_limpio}", timeout=15)
+            if st_b == 200 and html_b:
+                m_prod = re.search(
+                    rf'https://www\.priceshoes\.com/productos/[a-zA-Z0-9\-]*{id_limpio}[a-zA-Z0-9\-]*', html_b
+                )
+                m_rel = re.search(
+                    rf'href=["\'](/productos/[a-zA-Z0-9\-]*{id_limpio}[a-zA-Z0-9\-]*)["\']', html_b
+                )
+                if m_prod:
+                    url_ficha = m_prod.group(0)
+                elif m_rel:
+                    url_ficha = f"https://www.priceshoes.com{m_rel.group(1)}"
+                elif procesar_html(html_b):
+                    return imagenes
+
+        if url_ficha:
+            st_p, _, html_p = http_get_bytes(url_ficha, timeout=15)
+            if st_p == 200 and html_p:
+                procesar_html(html_p)
+    except Exception:
+        pass
+    return imagenes
+
+
+# ======================================================================================
+# LÁMINAS
+# ======================================================================================
+def crear_lamina_01_portada_blanca(img_recortada: Image.Image) -> Image.Image:
+    lienzo = Image.new("RGB", (1200, 1200), (255, 255, 255))
+    mejorada = ImageEnhance.Sharpness(img_recortada).enhance(1.18)
+    prod = ImageOps.contain(mejorada, (1080, 1020), Image.Resampling.LANCZOS)
+    lienzo.paste(prod, ((1200 - prod.width) // 2, (1200 - prod.height) // 2))
+    return lienzo
+
+
+def crear_lamina_02_angulo_galeria(
+    img_01_recortada: Image.Image, img_02_recortada: Optional[Image.Image]
+) -> Image.Image:
+    lienzo = Image.new("RGB", (1200, 1200), (255, 255, 255))
+    if img_02_recortada is not None:
+        mejorada = ImageEnhance.Sharpness(img_02_recortada).enhance(1.18)
+        prod = ImageOps.contain(mejorada, (1080, 1020), Image.Resampling.LANCZOS)
+    else:
+        mejorada = ImageEnhance.Sharpness(img_01_recortada).enhance(1.22)
+        prod = ImageOps.contain(mejorada, (1140, 1080), Image.Resampling.LANCZOS)
+    lienzo.paste(prod, ((1200 - prod.width) // 2, (1200 - prod.height) // 2))
+    return lienzo
+
+
+def renderizar_lamina_03_ficha_beneficios(
+    img_01_recortada: Image.Image, nombre: str, perfil: Dict[str, Any], tallas_disponibles: List[str]
+) -> Image.Image:
+    lienzo = Image.new("RGB", (1200, 1200), (244, 247, 252))
+    draw = ImageDraw.Draw(lienzo)
+    f_pill = cargar_fuente(18, True)
+    f_chip_s = cargar_fuente(14, True)
+    f_info_ancho = 1000
+
+    # Encabezado
+    draw.rounded_rectangle([30, 25, 1170, 155], radius=20, fill=(15, 23, 42))
+    draw.rounded_rectangle([35, 147, 1165, 155], radius=4, fill=(245, 158, 11))
+    titulo = limpiar_titulo(nombre).upper()
+    draw.text((60, 44), titulo, fill=(255, 255, 255), font=ajustar_fuente(draw, titulo, 770, 34, 20, True))
+    sub = perfil["subtitulo_03"]
+    draw.text((60, 96), sub, fill=(148, 163, 184), font=ajustar_fuente(draw, sub, 770, 19, 12, True))
+    draw.rounded_rectangle([855, 55, 1140, 115], radius=28, fill=(245, 158, 11))
+    texto_centrado(draw, 855, 1140, 74, "CALIDAD GARANTIZADA", f_pill, (15, 23, 42))
+
+    # Panel izquierdo
+    draw.rounded_rectangle([30, 180, 540, 765], radius=22, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
+    draw.rounded_rectangle([75, 205, 495, 255], radius=24, fill=(220, 252, 231), outline=(134, 239, 172), width=2)
+    texto_centrado(draw, 75, 495, 219, "ENVÍO SEGURO DESDE CDMX", f_pill, (21, 128, 61))
+
+    mejorada = ImageEnhance.Sharpness(img_01_recortada).enhance(1.18)
+    prod_izq = ImageOps.contain(mejorada, (460, 380), Image.Resampling.LANCZOS)
+    lienzo.paste(prod_izq, (30 + (510 - prod_izq.width) // 2, 275 + (400 - prod_izq.height) // 2))
+
+    badge = perfil["badge_izq_inf"]
+    draw.rounded_rectangle([55, 690, 515, 742], radius=24, fill=(219, 234, 254), outline=(147, 197, 253), width=2)
+    texto_centrado(draw, 55, 515, 705, badge, ajustar_fuente(draw, badge, 420, 18, 12, True), (29, 78, 216))
+
+    # Beneficios
+    y_card = 180
+    for tit_b, desc_b in perfil["beneficios"]:
+        draw.rounded_rectangle([565, y_card, 1170, y_card + 132], radius=18, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
+        draw.rounded_rectangle([565, y_card + 10, 577, y_card + 122], radius=6, fill=(37, 99, 235))
+        draw.ellipse([596, y_card + 38, 650, y_card + 92], fill=(22, 163, 74))
+        draw.line([(611, y_card + 66), (620, y_card + 76), (636, y_card + 55)], fill=(255, 255, 255), width=5)
+        draw.text((670, y_card + 16), tit_b, fill=(15, 23, 42), font=ajustar_fuente(draw, tit_b, 480, 22, 14, True))
+        f_d, lineas, tam = envolver_ajustado(draw, desc_b, 480, 3, 18, 13)
+        for i, lin in enumerate(lineas):
+            draw.text((670, y_card + 52 + i * (tam + 6)), lin, fill=(71, 85, 105), font=f_d)
+        y_card += 148
+
+    # Tallas
+    draw.rounded_rectangle([30, 790, 1170, 1175], radius=22, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
+    draw.rounded_rectangle([30, 790, 1170, 852], radius=18, fill=(15, 23, 42))
+    draw.rectangle([30, 830, 1170, 852], fill=(15, 23, 42))
+    texto_centrado(draw, 30, 1170, 808, "TALLAS NACIONALES (MX) DISPONIBLES EN STOCK", cargar_fuente(22, True), (255, 255, 255))
+
+    tallas_mostrar = tallas_disponibles[:8] if tallas_disponibles else perfil["tallas_default"]
+    n = len(tallas_mostrar)
+    ancho_chip = min(145, max(98, (1040 - (n - 1) * 16) // max(n, 1)))
+    x_chip = (1200 - (n * ancho_chip + (n - 1) * 16)) // 2
+    y_chip = 882
+    for t_val in tallas_mostrar:
+        t_clean = normalizar_etiqueta_talla(t_val)
+        draw.rounded_rectangle([x_chip + 2, y_chip + 4, x_chip + ancho_chip + 2, y_chip + 184], radius=16, fill=(191, 219, 254))
+        draw.rounded_rectangle([x_chip, y_chip, x_chip + ancho_chip, y_chip + 180], radius=16, fill=(37, 99, 235), outline=(29, 78, 216), width=2)
+        f_num = ajustar_fuente(draw, t_clean, ancho_chip - 20, 28, 12, True)
+        texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 28, t_clean, f_num, (255, 255, 255))
+        texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 84, perfil["unidad_chip"], f_chip_s, (191, 219, 254))
+        draw.line([x_chip + 14, y_chip + 118, x_chip + ancho_chip - 14, y_chip + 118], fill=(96, 165, 250), width=1)
+        texto_centrado(draw, x_chip, x_chip + ancho_chip, y_chip + 134, "DISPONIBLE", f_chip_s, (255, 255, 255))
+        x_chip += ancho_chip + 16
+
+    info = "¿Dudas con tu elección? Recibe asesoría sin compromiso en la sección de preguntas antes de comprar."
+    draw.rounded_rectangle([60, 1095, 1140, 1152], radius=16, fill=(239, 246, 255), outline=(191, 219, 254), width=1)
+    draw.ellipse([82, 1108, 112, 1138], fill=(37, 99, 235))
+    texto_centrado(draw, 82, 112, 1111, "i", f_pill, (255, 255, 255))
+    draw.text((128, 1112), info, fill=(30, 64, 175), font=ajustar_fuente(draw, info, f_info_ancho, 18, 12))
+    return lienzo
+
+
+def renderizar_lamina_04_guia_tallas_cm(perfil: Dict[str, Any], tallas_disponibles: List[str]) -> Image.Image:
+    lienzo = Image.new("RGB", (1200, 1200), (244, 247, 252))
+    draw = ImageDraw.Draw(lienzo)
+    f_paso_h = cargar_fuente(21, True)
+
+    draw.rounded_rectangle([30, 25, 1170, 150], radius=20, fill=(15, 23, 42))
+    draw.rounded_rectangle([35, 142, 1165, 150], radius=4, fill=(245, 158, 11))
+    t4, s4 = perfil["titulo_04"], perfil["subtitulo_04"]
+    texto_centrado(draw, 30, 1170, 42, t4, ajustar_fuente(draw, t4, 1080, 32, 18, True), (255, 255, 255))
+    texto_centrado(draw, 30, 1170, 94, s4, ajustar_fuente(draw, s4, 1080, 19, 12, True), (148, 163, 184))
+
+    set_activas = {normalizar_etiqueta_talla(t) for t in (tallas_disponibles or perfil["tallas_default"][:3])}
+    cabeceras = perfil["columnas_04"]
+    cols = ((28, 160), (195, 180), (385, 160))  # (desplazamiento x, ancho máx.)
+
+    for x0, x1, filas in ((30, 585, perfil["filas_izq"]), (615, 1170, perfil["filas_der"])):
+        draw.rounded_rectangle([x0, 172, x1, 830], radius=18, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
+        draw.rounded_rectangle([x0, 172, x1, 232], radius=16, fill=(15, 23, 42))
+        draw.rectangle([x0, 210, x1, 232], fill=(15, 23, 42))
+        for (off, ancho), txt in zip(cols, cabeceras):
+            draw.text((x0 + off, 191), txt, fill=(255, 255, 255), font=ajustar_fuente(draw, txt, ancho, 18, 11, True))
+
+        alto_f = min(74, 585 // max(len(filas), 1))
+        y_f = 240
+        for idx_f, (v1, v2, v3) in enumerate(filas):
+            y_t = y_f + (alto_f - 28) // 2
+            if normalizar_etiqueta_talla(v1.split("(")[0]) in set_activas:
+                draw.rounded_rectangle([x0 + 10, y_f, x1 - 10, y_f + alto_f - 6], radius=10, fill=(220, 252, 231), outline=(134, 239, 172), width=2)
+                draw.ellipse([x0 + 20, y_f + alto_f // 2 - 9, x0 + 34, y_f + alto_f // 2 + 5], fill=(22, 163, 74))
+                celdas = (
+                    (42, 148, v1, (21, 128, 61), True),
+                    (195, 180, v2, (21, 128, 61), True),
+                    (385, 160, v3, (29, 78, 216), True),
+                )
+            else:
+                bg_row = (248, 250, 252) if idx_f % 2 == 1 else (255, 255, 255)
+                draw.rounded_rectangle([x0 + 10, y_f, x1 - 10, y_f + alto_f - 6], radius=8, fill=bg_row)
+                celdas = (
+                    (28, 162, v1, (15, 23, 42), True),
+                    (195, 180, v2, (71, 85, 105), False),
+                    (385, 160, v3, (37, 99, 235), True),
+                )
+            for off, ancho, txt, color, neg in celdas:
+                draw.text((x0 + off, y_t), txt, fill=color, font=ajustar_fuente(draw, txt, ancho, 20, 11, neg))
+            y_f += alto_f
+
+    draw.rounded_rectangle([30, 852, 1170, 1175], radius=22, fill=(255, 255, 255), outline=(219, 228, 240), width=2)
+    t1, t2 = "¿CÓMO VERIFICAR TU TALLA O MEDIDA EN 3 PASOS? ", "(Toma solo 1 minuto)"
+    w1, w2 = draw.textlength(t1, font=f_paso_h), draw.textlength(t2, font=f_paso_h)
+    x_ini = (1200 - (w1 + w2)) / 2
+    draw.text((x_ini, 872), t1, fill=(15, 23, 42), font=f_paso_h)
+    draw.text((x_ini + w1, 872), t2, fill=(22, 163, 74), font=f_paso_h)
+
+    x_card = 55
+    for idx_p, (tit_p, desc_p) in enumerate(perfil["pasos_04"], 1):
+        draw.rounded_rectangle([x_card, 918, x_card + 346, 1152], radius=16, fill=(248, 250, 252), outline=(219, 228, 240), width=2)
+        draw.rounded_rectangle([x_card, 918, x_card + 346, 926], radius=4, fill=(37, 99, 235))
+        draw.rounded_rectangle([x_card + 20, 942, x_card + 62, 984], radius=10, fill=(37, 99, 235))
+        texto_centrado(draw, x_card + 20, x_card + 62, 949, str(idx_p), f_paso_h, (255, 255, 255))
+        draw.text((x_card + 76, 951), tit_p, fill=(15, 23, 42), font=ajustar_fuente(draw, tit_p, 255, 19, 12, True))
+        f_d, lineas, _ = envolver_ajustado(draw, desc_p, 300, 4, 17, 13)
+        for i, lin in enumerate(lineas):
+            draw.text((x_card + 22, 1005 + i * 28), lin, fill=(71, 85, 105), font=f_d)
+        x_card += 372
+    return lienzo
+
+
+# ======================================================================================
+# DIRECTORIOS, IMÁGENES LOCALES Y FLUJO PRINCIPAL
+# ======================================================================================
+def _id_de_carpeta(nombre_carpeta: str) -> str:
+    """ID numérico (5 a 8 dígitos) dentro del nombre de la carpeta, o '' si no tiene."""
+    m = re.search(r"(\d{5,8})", nombre_carpeta)
+    return m.group(1) if m else ""
+
+
+def _es_carpeta_de_catalogo(nombre_carpeta: str, datos_bd: Dict[str, Dict[str, Any]]) -> bool:
+    """La carpeta pertenece a un producto de catálogo (por su id con o sin ceros a la izquierda)."""
+    cid = _id_de_carpeta(nombre_carpeta)
+    return bool(cid) and (cid in datos_bd or (cid.lstrip("0") or cid) in datos_bd)
+
+
+def _fusionar_carpeta_ps(d: Path) -> None:
+    """Mueve el contenido de `PS-1342498` a `1342498` (sin sobrescribir) y elimina la carpeta vieja."""
+    id_puro = d.name[3:].strip()
+    if not id_puro:
+        return
+    dest = DIR_CATALOGO_LISTO / id_puro
+    dest.mkdir(parents=True, exist_ok=True)
+    for arch in d.iterdir():
+        if not arch.is_file():
+            continue
+        dest_arch = dest / arch.name
+        if not dest_arch.exists():
+            shutil.move(str(arch), str(dest_arch))
+        else:
+            arch.unlink()
+    try:
+        d.rmdir()
+    except Exception:
+        pass
+
+
+def _borrar_carpeta_si_vacia(d: Path) -> None:
+    if any(d.iterdir()):
+        return
+    try:
+        d.rmdir()
+    except Exception:
+        pass
+
+
+def normalizar_y_depurar_directorios(datos_bd: Dict[str, Dict[str, Any]]) -> int:
+    """
+    1. Fusiona carpetas `PS-1342498` a `1342498`.
+    2. ELIMINA cualquier carpeta en `data/catalogo_listo` que NO pertenezca a los
+       catálogos PDF oficiales cargados en `datos_bd`.
+
+    Protección: si `datos_bd` viene vacío (BD ausente, sin columna origen_catalogo o sin filas)
+    NO se elimina nada, para no borrar todo el catálogo por un error de lectura.
+    """
+    if not DIR_CATALOGO_LISTO.exists():
+        return 0
+
+    for d in list(DIR_CATALOGO_LISTO.iterdir()):
+        if d.is_dir() and d.name.upper().startswith("PS-"):
+            _fusionar_carpeta_ps(d)
+
+    if not datos_bd:
+        print("⚠️ Sin productos de catálogo PDF en la BD: se omite la depuración de carpetas.")
+        return 0
+
+    eliminadas = 0
+    for d in list(DIR_CATALOGO_LISTO.iterdir()):
+        if not d.is_dir():
+            continue
+        if _es_carpeta_de_catalogo(d.name, datos_bd):
+            _borrar_carpeta_si_vacia(d)
+        else:
+            shutil.rmtree(d, ignore_errors=True)
+            eliminadas += 1
+
+    return eliminadas
+
+
+NOMBRES_IMG_01 = ["01_original_raw.jpg", "01_portada_blanca.jpg", "01_portada.jpg", "01_portada_hd.jpg", "01.jpg"]
+NOMBRES_IMG_02 = ["02_angulo_raw.jpg", "02_angulo_galeria.jpg", "02_angulo.jpg", "02_detalle.jpg", "02_angulo_hd.jpg", "02.jpg"]
+PREFIJOS_NO_PORTADA = ("02", "03", "04", "lamina_03", "lamina_04")
+
+
+def _abrir_rgb(ruta: Path) -> Optional[Image.Image]:
+    try:
+        return Image.open(ruta).convert("RGB")
+    except Exception:
+        return None
+
+
+def _guardar_respaldo_si_falta(img: Image.Image, ruta: Path) -> None:
+    """Guarda el respaldo crudo una sola vez, para no degradar la calidad en futuras corridas."""
+    if ruta.exists():
+        return
+    try:
+        img.save(ruta, quality=95)
+    except Exception:
+        pass
+
+
+def _buscar_imagen_01(carpeta: Path) -> Optional[Image.Image]:
+    """Primera foto: por nombre conocido y, si no, cualquier imagen que no sea lámina 02-04."""
+    conocidas = [carpeta / n for n in NOMBRES_IMG_01 if (carpeta / n).exists()]
+    otras = [
+        arch
+        for arch in sorted(carpeta.glob("*.jpg")) + sorted(carpeta.glob("*.png"))
+        if not arch.name.lower().startswith(PREFIJOS_NO_PORTADA)
+    ]
+    for ruta in conocidas:
+        img = _abrir_rgb(ruta)
+        if img is not None:
+            return img
+    for ruta in otras:
+        img = _abrir_rgb(ruta)
+        if img is not None:
+            return img
+    return None
+
+
+def _buscar_imagen_02(carpeta: Path, img_01: Optional[Image.Image]) -> Optional[Image.Image]:
+    """Segundo ángulo distinto de la primera foto (se descartan láminas viejas con lupa o rotación)."""
+    for n2 in NOMBRES_IMG_02:
+        if not (carpeta / n2).exists():
+            continue
+        cand2 = _abrir_rgb(carpeta / n2)
+        if cand2 is None or tiene_lupa_o_rotacion_vieja(cand2):
+            continue
+        try:
+            es_distinta = img_01 is not None and not son_imagenes_iguales(img_01, cand2, revisar_espejo=True)
+        except Exception:
+            continue
+        if es_distinta:
+            return cand2
+    return None
+
+
+def obtener_imagenes_base_locales(carpeta: Path) -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
+    img_01 = _buscar_imagen_01(carpeta)
+    if img_01 is not None:
+        _guardar_respaldo_si_falta(img_01, carpeta / "01_original_raw.jpg")
+
+    img_02 = _buscar_imagen_02(carpeta, img_01)
+    if img_02 is not None:
+        _guardar_respaldo_si_falta(img_02, carpeta / "02_angulo_raw.jpg")
+    return img_01, img_02
+
+
+
+
+
+ARCHIVOS_A_CONSERVAR = {
+    "01_portada_blanca.jpg", "02_angulo_galeria.jpg", "03_ficha_beneficios.jpg", "04_guia_tallas_cm.jpg",
+    "01_original_raw.jpg", "02_angulo_raw.jpg", "01.jpg", "02.jpg", "03.jpg", "04.jpg",
+}
+
+
+def _meta_de_carpeta(nombre_carpeta: str, datos_bd: Dict[str, Dict[str, Any]]) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """(id de la carpeta, id sin ceros, datos del producto o None si no es de catálogo)."""
+    id_carpeta = _id_de_carpeta(nombre_carpeta) or nombre_carpeta
+    id_limpio = id_carpeta.lstrip("0") or id_carpeta
+    return id_carpeta, id_limpio, datos_bd.get(id_carpeta) or datos_bd.get(id_limpio)
+
+
+def _indexar_carpetas_existentes() -> Dict[str, Path]:
+    carpetas_por_id: Dict[str, Path] = {}
+    for d in DIR_CATALOGO_LISTO.iterdir():
+        cid = _id_de_carpeta(d.name) if d.is_dir() else ""
+        if cid:
+            carpetas_por_id[cid] = d
+            carpetas_por_id[cid.lstrip("0") or cid] = d
+    return carpetas_por_id
+
+
+def _crear_carpetas_nuevas(datos_bd: Dict[str, Dict[str, Any]], carpetas_por_id: Dict[str, Path]) -> None:
+    """Abre carpeta a los SKUs de catálogo con costo y stock que aún no tienen (tope por corrida)."""
+    nuevas_agregadas = 0
+    skus_ordenados = sorted(
+        datos_bd.values(),
+        key=lambda x: (x.get("stock", 0), x.get("costo", 0.0)),
+        reverse=True,
+    )
+    vistos: set[str] = set()
+    for meta in skus_ordenados:
+        if nuevas_agregadas >= MAX_DESCARGAS_WEB_POR_CORRIDA:
+            break
+        id_l = meta["id_limpio"]
+        if id_l in vistos or id_l in carpetas_por_id:
+            continue
+        vistos.add(id_l)
+        if meta["origen_catalogo"] and meta["costo"] > 0 and meta["stock"] > 0:
+            nueva_c = DIR_CATALOGO_LISTO / id_l
+            nueva_c.mkdir(parents=True, exist_ok=True)
+            carpetas_por_id[id_l] = nueva_c
+            nuevas_agregadas += 1
+
+
+def _carpetas_por_prioridad(datos_bd: Dict[str, Dict[str, Any]]) -> List[Path]:
+    """Carpetas ordenadas: primero las que tienen costo, luego mayor stock."""
+
+    def prioridad(c: Path) -> Tuple[int, int, str]:
+        _, _, meta = _meta_de_carpeta(c.name, datos_bd)
+        info = meta or {}
+        return (1 if info.get("costo", 0) > 0 else 0, int(info.get("stock", 0)), c.name)
+
+    return sorted([d for d in DIR_CATALOGO_LISTO.iterdir() if d.is_dir()], key=prioridad, reverse=True)
+
+
+def _guardar_imagen(img: Image.Image, ruta: Path) -> None:
+    try:
+        img.save(ruta, quality=95)
+    except Exception:
+        pass
+
+
+def _descargar_fotos_faltantes(
+    carpeta: Path, id_limpio: str, meta: Dict[str, Any], img_01_raw: Optional[Image.Image], img_02_raw: Optional[Image.Image]
+) -> Tuple[Optional[Image.Image], Optional[Image.Image]]:
+    """Descarga las fotos oficiales y guarda sus respaldos crudos. Devuelve (foto 1, foto 2)."""
+    descargadas = descargar_fotos_oficiales_ps(id_limpio, meta.get("url_real", ""), img_01_existente=img_01_raw)
+    if not descargadas:
+        return img_01_raw, img_02_raw
+    img_01_raw = descargadas[0]
+    _guardar_imagen(img_01_raw, carpeta / "01_original_raw.jpg")
+    if len(descargadas) > 1:
+        img_02_raw = descargadas[1]
+        _guardar_imagen(img_02_raw, carpeta / "02_angulo_raw.jpg")
+    return img_01_raw, img_02_raw
+
+
+def _guardar_laminas(carpeta: Path, laminas: List[Tuple[str, Image.Image]]) -> None:
+    """4 codificaciones JPEG; el alias corto (01.jpg ... 04.jpg) se copia en disco."""
+    for base, lam in laminas:
+        destino = carpeta / f"{base}.jpg"
+        lam.save(destino, quality=95)
+        shutil.copyfile(destino, carpeta / f"{base[:2]}.jpg")
+
+    for arch in list(carpeta.glob("*.jpg")) + list(carpeta.glob("*.png")):
+        if arch.name not in ARCHIVOS_A_CONSERVAR:
+            try:
+                arch.unlink()
+            except Exception:
+                pass
+
+
+def _renderizar_carrusel(
+    carpeta: Path, meta: Dict[str, Any], img_01_raw: Image.Image, img_02_raw: Optional[Image.Image]
+) -> Tuple[Dict[str, Any], bool]:
+    """Genera y guarda las 4 láminas. Devuelve (perfil usado, si hubo segundo ángulo real)."""
+    img_01_rec = recortar_espacio_blanco(img_01_raw)
+    img_02_rec = (
+        recortar_espacio_blanco(img_02_raw)
+        if (img_02_raw is not None and not son_imagenes_iguales(img_01_rec, img_02_raw, revisar_espejo=False))
+        else None
+    )
+    tallas = meta.get("tallas_lista", [])
+    perfil = detectar_perfil_prenda(
+        meta["nombre"], meta["marca"], meta["corte"], tallas, meta.get("origen_catalogo", "")
+    )
+    _guardar_laminas(carpeta, [
+        ("01_portada_blanca", crear_lamina_01_portada_blanca(img_01_rec)),
+        ("02_angulo_galeria", crear_lamina_02_angulo_galeria(img_01_rec, img_02_rec)),
+        ("03_ficha_beneficios", renderizar_lamina_03_ficha_beneficios(img_01_rec, meta["nombre"], perfil, tallas)),
+        ("04_guia_tallas_cm", renderizar_lamina_04_guia_tallas_cm(perfil, tallas)),
+    ])
+    return perfil, img_02_rec is not None
+
+
+def _procesar_carpeta(carpeta: Path, datos_bd: Dict[str, Dict[str, Any]], permitir_web: bool) -> Tuple[bool, bool]:
+    """Procesa un SKU. Devuelve (carrusel actualizado, se usó una descarga web)."""
+    id_carpeta, id_limpio, meta = _meta_de_carpeta(carpeta.name, datos_bd)
+    if not meta:
+        # Carpeta ajena a los catálogos PDF (solo llega aquí si la BD sí tiene datos)
+        if datos_bd:
+            shutil.rmtree(carpeta, ignore_errors=True)
+        return False, False
+
+    img_01_raw, img_02_raw = obtener_imagenes_base_locales(carpeta)
+    uso_web = (img_01_raw is None or img_02_raw is None) and permitir_web
+    if uso_web:
+        img_01_raw, img_02_raw = _descargar_fotos_faltantes(carpeta, id_limpio, meta, img_01_raw, img_02_raw)
+
+    if img_01_raw is None:
+        _borrar_carpeta_si_vacia(carpeta)
+        return False, uso_web
+
+    perfil, con_segundo_angulo = _renderizar_carrusel(carpeta, meta, img_01_raw, img_02_raw)
+    estado_02 = "2.º ángulo PS" if con_segundo_angulo else "Encuadre detalle 0°"
+    print(f"✅ [{id_carpeta}] ({meta['origen_catalogo']} | {perfil['tipo']} | {estado_02}) -> {meta['nombre']}")
+    return True, uso_web
+
+
+def ejecutar_estudio_fotografico() -> None:
+    print("=" * 88)
+    print("📸 PASO 6: ESTUDIO FOTOGRÁFICO HD (EXCLUSIVO CATÁLOGOS PDF OFICIALES)")
+    print("=" * 88)
+
+    DIR_CATALOGO_LISTO.mkdir(parents=True, exist_ok=True)
+    datos_bd = cargar_catalogo_sqlite()
+    borradas = normalizar_y_depurar_directorios(datos_bd)
+    if borradas > 0:
+        print(f"🧹 Se descartaron y eliminaron {borradas} carpetas antiguas fuera de catálogo PDF.")
+
+    _crear_carpetas_nuevas(datos_bd, _indexar_carpetas_existentes())
+
+    total_actualizados = 0
+    descargas_web = 0
+    for carpeta in _carpetas_por_prioridad(datos_bd):
+        actualizado, uso_web = _procesar_carpeta(carpeta, datos_bd, descargas_web < MAX_DESCARGAS_WEB_POR_CORRIDA)
+        total_actualizados += int(actualizado)
+        descargas_web += int(uso_web)
+
+    print("=" * 88)
+    print(
+        f"🎉 Total actualizado: {total_actualizados} carruseles exclusivos de Catálogos PDF "
+        f"(Web: {descargas_web}/{MAX_DESCARGAS_WEB_POR_CORRIDA})."
+    )
+
+    if Path("paso5_motor_financiero.py").exists():
+        print("🔄 Sincronizando diagnóstico 4/4 con paso5_motor_financiero.py...")
+        subprocess.run([sys.executable, "paso5_motor_financiero.py"], check=False)
+
+
+if __name__ == "__main__":
+    ejecutar_estudio_fotografico()

@@ -1,12 +1,14 @@
+# -*- coding: utf-8 -*-
 """
 ========================================================================================
-PASO 3: RECOLECTOR LIGERO ANTI-BAN (EXCLUSIVO PARA LOS 44 CATÁLOGOS PDF OFICIALES)
+PASO 3: RECOLECTOR LIGERO ANTI-BAN (PRIORIZADO EN LOS CUADRANTES VERDES DE LA MATRIZ)
 ========================================================================================
 - Descarta y elimina de SQLite y de `data/catalogo_listo` cualquier SKU ajeno a los 44 PDFs
   (con respaldo previo de la BD y protecciones contra borrados masivos por error).
-- Barre en orden de prioridad comercial todos los SKUs de los 44 catálogos oficiales.
-- Extrae costo de socio, URL canónica real, nombre limpio del modelo y stock de Vallejo
-  tanto para calzado (15.0 a 32.0) como para ropa, lencería, calcetería y jeans (CH, M, G, XG, UNI).
+- Prioriza estrictamente los 4 cuadrantes verdes de la Matriz de Maslow:
+  1) Calzado escolar, 2) Tenis con licencia, 3) Sandalias y botas de moda, 4) Pantuflas.
+- Sincroniza automáticamente `historial_stock_21_dias` y `stock_tienda` (Vallejo) para que
+  el panel y `exportar_mercadolibre.py` dispongan del inventario al instante.
 ========================================================================================
 """
 
@@ -21,9 +23,11 @@ import re
 import shutil
 import sqlite3
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 from playwright.sync_api import sync_playwright
+
+import inventario_tiendas as inv
 
 RUTA_BD = "data/zapateria_vallejo.db"
 RUTA_SESION = "data/sesion_vallejo.json"
@@ -34,57 +38,60 @@ DIR_CATALOGO_LISTO = Path("data/catalogo_listo")
 # ===========================================================================
 LOTE_MICRO_SESION = 60
 MODO_INVISIBLE = True
-# Si tantos SKUs seguidos no devuelven datos, se detiene la sesión (sesión vencida o bloqueo)
 MAX_SIN_DATOS_SEGUIDOS = 10
-# Seguridad: si TODAS las filas de la BD parecieran ajenas a los 44 PDFs, no se borra nada
 PERMITIR_BORRAR_TODO = False
+RATIO_COSTO_MIN_ESPERADO = 0.50
+RATIO_COSTO_MAX_ESPERADO = 0.90
 
-# Orden de prioridad comercial para barrer los 44 catálogos PDF oficiales
+# Orden de prioridad comercial empezando por los CUADRANTES VERDES de la Matriz de Maslow
 CATALOGOS_PRIORIDAD: List[Tuple[str, str]] = [
-    ("1342200", "1342200 - Caballeros"),
+    # --- 🟢 ETAPA 1: EMPEZAR AQUÍ (VERDES: Escolar, Licencias, Sandalias/Botas Moda, Pantuflas) ---
     ("1370231", "1370231 - Escolar"),
-    ("1346256", "1346256 - Urbano"),
-    ("1345253", "1345253 - Botas"),
-    ("1346284", "1346284 - Vestir Casual"),
-    ("1348737", "1348737 - Vestir"),
-    ("1348757", "1348757 - Man"),
+    ("1348800", "1348800 - Licencias"),
     ("1348783", "1348783 - Kids"),
     ("1378033", "1378033 - Kids Todo en Uno"),
-    ("1348800", "1348800 - Licencias"),
-    ("1353843", "1353843 - Confort"),
-    ("1380354", "1380354 - Reebok Impulsados"),
-    ("1380332", "1380332 - Goodyear Botas"),
+    ("1368804", "1368804 - Pop Universe Mini"),
+    ("1381556", "1381556 - Navidad Kids"),
+    ("1368789", "1368789 - Sandalias"),
+    ("1345253", "1345253 - Botas"),
     ("1380328", "1380328 - Botas Largas"),
     ("1380359", "1380359 - Botas Kits"),
     ("1380363", "1380363 - Basicos Botines"),
     ("1380367", "1380367 - Botas Texano"),
-    ("1368789", "1368789 - Sandalias"),
-    ("1353557", "1353557 - Juvenil"),
     ("1381342", "1381342 - Ella"),
     ("1380337", "1380337 - Coleccion Thalia"),
     ("1380341", "1380341 - Belinda Fashion & Chic"),
-    ("1377702", "1377702 - Exclusivos"),
+    ("1381350", "1381350 - Mushu Esenciales Home"),
+    ("1380996", "1380996 - Love to Lounge"),
+    ("1380350", "1380350 - Navidad Home"),
+    # --- 🟠 ETAPA 2: SEGUNDA ETAPA (NARANJAS: Tenis Urbanos Dama y Línea Confort) ---
+    ("1346256", "1346256 - Urbano"),
+    ("1353557", "1353557 - Juvenil"),
     ("1380516", "1380516 - Oportunidades Urbano"),
-    ("1380358", "1380358 - Importados Fall Ofertas"),
+    ("1368805", "1368805 - Urban Lifestyle Mini"),
+    ("1353843", "1353843 - Confort"),
     ("1381316", "1381316 - Med Chef"),
+    # --- ⚪ ETAPA 3: DEJAR PARA DESPUÉS (GRISES: Caballeros, Vestir, Marcas, Ropa) ---
+    ("1342200", "1342200 - Caballeros"),
+    ("1346284", "1346284 - Vestir Casual"),
+    ("1348737", "1348737 - Vestir"),
+    ("1348757", "1348757 - Man"),
+    ("1380332", "1380332 - Goodyear Botas"),
+    ("1380354", "1380354 - Reebok Impulsados"),
+    ("1377702", "1377702 - Exclusivos"),
+    ("1380358", "1380358 - Importados Fall Ofertas"),
     ("1353556", "1353556 - Calzado y Accesorios"),
     ("1376435", "1376435 - Todo en Uno"),
     ("1348749", "1348749 - NBA"),
     ("1348753", "1348753 - NFL"),
     ("1368800", "1368800 - Prokennex Mini"),
-    ("1368804", "1368804 - Pop Universe Mini"),
-    ("1368805", "1368805 - Urban Lifestyle Mini"),
     ("1352311", "1352311 - Seven Jeans"),
     ("1381338", "1381338 - Jeans"),
     ("1348733", "1348733 - Abrigador"),
     ("1348804", "1348804 - Pijamas"),
-    ("1380996", "1380996 - Love to Lounge"),
     ("1381346", "1381346 - Basicos OID6"),
-    ("1381350", "1381350 - Mushu Esenciales Home"),
     ("1348779", "1348779 - Accesorios"),
     ("1380346", "1380346 - Navidad"),
-    ("1380350", "1380350 - Navidad Home"),
-    ("1381556", "1381556 - Navidad Kids"),
 ]
 
 MAPA_CATALOGOS: Dict[str, str] = dict(CATALOGOS_PRIORIDAD)
@@ -92,8 +99,6 @@ ORDEN_PRIORIDAD_CAT: Dict[str, int] = {
     nom: idx for idx, (_, nom) in enumerate(CATALOGOS_PRIORIDAD, start=1)
 }
 
-# Tallas válidas: calzado 10.0-99.5, letras (XS a 4XG, ECH, EG, UNI...), combos (CH/M) y
-# numeración de ropa/jeans (1-60, incluye pares e impares: 28, 30, 31, 33, 5, 7...)
 PATRON_TALLA_VALIDA = re.compile(
     r"^(?:\d{2}\.[05]"
     r"|X{0,2}S|X{0,2}L|X?CH|ECH|MED|M|G|XG|XXG|[2-4]X[GL]|EG|EEG"
@@ -101,6 +106,11 @@ PATRON_TALLA_VALIDA = re.compile(
     r"|[1-9]|[1-5]\d|60)$",
     re.IGNORECASE,
 )
+
+
+def es_sku_verde(nombre_modelo: str, origen_catalogo: str) -> bool:
+    etapa, _ = inv.clasificar_matriz_maslow(nombre_modelo, origen_catalogo)
+    return etapa == inv.ETAPA_VERDE
 
 
 # ===========================================================================
@@ -141,6 +151,9 @@ def asegurar_estructura_bd(conn: sqlite3.Connection) -> None:
         "ultima_sincronizacion": "TIMESTAMP",
         "tier": "TEXT DEFAULT 'B'",
         "origen_catalogo": "TEXT DEFAULT ''",
+        "precio_publico": "REAL DEFAULT 0.0",
+        "costo_validacion": "TEXT DEFAULT ''",
+        "tipo_producto": "TEXT DEFAULT ''",
     }
     for col, tipo in nuevas_columnas.items():
         if col not in columnas_existentes:
@@ -157,11 +170,11 @@ def asegurar_estructura_bd(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_stock_id_ps ON historial_stock_21_dias(id_ps)")
+    inv.asegurar_esquema(conn)
     conn.commit()
 
 
 def normalizar_id_sku(valor: object) -> str:
-    """Quita el prefijo 'PS-' (si existe) para comparar SKUs contra nombres de carpeta."""
     return re.sub(r"^PS-", "", str(valor).strip(), flags=re.IGNORECASE)
 
 
@@ -172,7 +185,6 @@ def extraer_id_catalogo(texto_origen: str) -> str:
 
 
 def respaldar_bd(conn: sqlite3.Connection) -> bool:
-    """Respaldo diario (una vez por día) antes de borrar filas. Devuelve True si hay respaldo."""
     destino = Path("data") / f"respaldo_antes_de_depurar_{datetime.now():%Y%m%d}.db"
     if destino.exists():
         return True
@@ -189,36 +201,71 @@ def respaldar_bd(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _clasificar_filas_por_catalogo(filas) -> Tuple[List[Tuple[str]], List[Tuple[str, str]], Set[str]]:
+    ids_borrar: List[Tuple[str]] = []
+    actualizaciones: List[Tuple[str, str]] = []
+    ids_validos: Set[str] = set()
+
+    for id_ps, orig in filas:
+        id_str = str(id_ps).strip()
+        texto_orig = str(orig).strip()
+        nom_oficial = MAPA_CATALOGOS.get(extraer_id_catalogo(texto_orig))
+        if nom_oficial is None:
+            ids_borrar.append((id_str,))
+            continue
+        id_norm = normalizar_id_sku(id_str)
+        ids_validos.update({id_str, id_norm, id_norm.lstrip("0") or id_norm})
+        if texto_orig != nom_oficial:
+            actualizaciones.append((nom_oficial, id_str))
+
+    return ids_borrar, actualizaciones, ids_validos
+
+
+def _limpiar_tallas_invalidas(cur: sqlite3.Cursor) -> None:
+    filas_tallas = cur.execute("SELECT rowid, id_ps, talla FROM historial_stock_21_dias").fetchall()
+    basura = [
+        (int(rowid), str(s_id))
+        for rowid, s_id, t_val in filas_tallas
+        if not PATRON_TALLA_VALIDA.match(str(t_val).strip())
+    ]
+    if not basura:
+        return
+    cur.executemany("DELETE FROM historial_stock_21_dias WHERE rowid = ?", [(rowid,) for rowid, _ in basura])
+    cur.executemany(
+        """
+        UPDATE zapatos_candidatos
+        SET ultima_sincronizacion = NULL, stock_total_anterior = -1
+        WHERE id_ps = ?
+        """,
+        [(s,) for s in {s_id for _, s_id in basura}],
+    )
+
+
+def _es_carpeta_ajena(nombre_carpeta: str, ids_validos: Set[str]) -> bool:
+    m_id = re.search(r"(\d{5,8})", nombre_carpeta)
+    cid = m_id.group(1) if m_id else ""
+    return not cid or (cid not in ids_validos and (cid.lstrip("0") or cid) not in ids_validos)
+
+
+def _borrar_carpetas_ajenas(ids_validos: Set[str]) -> int:
+    if not ids_validos or not DIR_CATALOGO_LISTO.exists():
+        return 0
+    carpetas_borradas = 0
+    for d in list(DIR_CATALOGO_LISTO.iterdir()):
+        if d.is_dir() and _es_carpeta_ajena(d.name, ids_validos):
+            shutil.rmtree(d, ignore_errors=True)
+            carpetas_borradas += 1
+    return carpetas_borradas
+
+
 def depurar_solo_44_catalogos(conn: sqlite3.Connection) -> None:
-    """
-    Elimina de SQLite y de `data/catalogo_listo` cualquier producto que NO provenga
-    de los 44 catálogos PDF oficiales, y estandariza el nombre del catálogo.
-    """
     cur = conn.cursor()
     antes = cur.execute("SELECT COUNT(*) FROM zapatos_candidatos").fetchone()[0]
     filas = cur.execute(
         "SELECT id_ps, COALESCE(origen_catalogo, '') FROM zapatos_candidatos"
     ).fetchall()
+    ids_borrar, actualizaciones, ids_validos = _clasificar_filas_por_catalogo(filas)
 
-    ids_borrar: List[Tuple[str]] = []
-    actualizaciones: List[Tuple[str, str]] = []
-    ids_validos: set[str] = set()
-
-    for id_ps, orig in filas:
-        id_str = str(id_ps).strip()
-        texto_orig = str(orig).strip()
-        id_cat = extraer_id_catalogo(texto_orig)
-
-        if id_cat in MAPA_CATALOGOS:
-            nom_oficial = MAPA_CATALOGOS[id_cat]
-            id_norm = normalizar_id_sku(id_str)
-            ids_validos.update({id_str, id_norm, id_norm.lstrip("0") or id_norm})
-            if texto_orig != nom_oficial:
-                actualizaciones.append((nom_oficial, id_str))
-        else:
-            ids_borrar.append((id_str,))
-
-    # Protección: si TODO parece ajeno, casi seguro es un problema de formato en origen_catalogo
     if filas and len(ids_borrar) == len(filas) and not PERMITIR_BORRAR_TODO:
         print(
             "⚠️ Ninguna fila de `zapatos_candidatos` coincide con los 44 catálogos oficiales. "
@@ -226,55 +273,18 @@ def depurar_solo_44_catalogos(conn: sqlite3.Connection) -> None:
         )
         return
 
-    puede_borrar = True
-    if ids_borrar and not respaldar_bd(conn):
-        puede_borrar = False
+    puede_borrar = not ids_borrar or respaldar_bd(conn)
+    if not puede_borrar:
         ids_borrar = []
 
-    if actualizaciones:
-        cur.executemany(
-            "UPDATE zapatos_candidatos SET origen_catalogo = ? WHERE id_ps = ?",
-            actualizaciones,
-        )
-
-    if ids_borrar:
-        cur.executemany("DELETE FROM zapatos_candidatos WHERE id_ps = ?", ids_borrar)
-        cur.executemany("DELETE FROM historial_stock_21_dias WHERE id_ps = ?", ids_borrar)
-
-    # Limpiar únicamente tallas basura que no sean ni decimales ni tallas válidas de ropa
-    filas_tallas = cur.execute("SELECT rowid, id_ps, talla FROM historial_stock_21_dias").fetchall()
-    rowids_basura: List[Tuple[int]] = []
-    skus_reset: set[str] = set()
-    for rowid, s_id, t_val in filas_tallas:
-        if not PATRON_TALLA_VALIDA.match(str(t_val).strip()):
-            rowids_basura.append((int(rowid),))
-            skus_reset.add(str(s_id))
-
-    if rowids_basura:
-        cur.executemany("DELETE FROM historial_stock_21_dias WHERE rowid = ?", rowids_basura)
-        cur.executemany(
-            """
-            UPDATE zapatos_candidatos
-            SET ultima_sincronizacion = NULL, stock_total_anterior = -1
-            WHERE id_ps = ?
-            """,
-            [(s,) for s in skus_reset],
-        )
+    cur.executemany("UPDATE zapatos_candidatos SET origen_catalogo = ? WHERE id_ps = ?", actualizaciones)
+    cur.executemany("DELETE FROM zapatos_candidatos WHERE id_ps = ?", ids_borrar)
+    cur.executemany("DELETE FROM historial_stock_21_dias WHERE id_ps = ?", ids_borrar)
+    _limpiar_tallas_invalidas(cur)
 
     conn.commit()
     despues = cur.execute("SELECT COUNT(*) FROM zapatos_candidatos").fetchone()[0]
-
-    # Eliminar carpetas físicas en data/catalogo_listo que no estén en ids_validos
-    carpetas_borradas = 0
-    if puede_borrar and ids_validos and DIR_CATALOGO_LISTO.exists():
-        for d in list(DIR_CATALOGO_LISTO.iterdir()):
-            if not d.is_dir():
-                continue
-            m_id = re.search(r"(\d{5,8})", d.name)
-            cid = m_id.group(1) if m_id else ""
-            if not cid or (cid not in ids_validos and (cid.lstrip("0") or cid) not in ids_validos):
-                shutil.rmtree(d, ignore_errors=True)
-                carpetas_borradas += 1
+    carpetas_borradas = _borrar_carpetas_ajenas(ids_validos) if puede_borrar else 0
 
     if ids_borrar or carpetas_borradas > 0:
         print(
@@ -285,13 +295,40 @@ def depurar_solo_44_catalogos(conn: sqlite3.Connection) -> None:
         print(f"📦 Catálogo oficial limpio en SQLite: {despues:,} SKUs exclusivos de los 44 PDFs.")
 
 
+def _datos_base_lote(fila) -> Tuple[str, str, str, float, float, int, object, str]:
+    id_ps, nombre, url, alpha, beta, stock_ant, ult_sinc, _costo, origen_cat = fila
+    id_str = str(id_ps).strip()
+    alpha = float(alpha) if alpha else 1.0
+    beta = float(beta) if beta else 2.0
+    stock_ant = int(stock_ant if stock_ant is not None else -1)
+
+    url_txt = str(url).strip() if url else ""
+    url_usar = url_txt if url_txt.startswith("http") else f"https://www.priceshoes.com/buscar?q={id_str}"
+    nombre_usar = str(nombre).strip() if nombre else f"Modelo {id_str}"
+    return id_str, nombre_usar, url_usar, alpha, beta, stock_ant, ult_sinc, origen_cat
+
+
+def _dias_sin_ver(ult_sinc: object, ahora: datetime) -> float:
+    try:
+        fecha_ant = datetime.fromisoformat(str(ult_sinc))
+        return max(0.05, (ahora - fecha_ant).total_seconds() / 86400.0)
+    except Exception:
+        return 5.0
+
+
+def _puntaje_ucb(alpha: float, beta: float, dias_sin_ver: float, verde: bool = False) -> float:
+    explotacion = alpha / beta
+    exploracion = 1.41 * (math.sqrt(alpha) / beta)
+    factor_verde = 1.60 if verde else 1.0
+    return (explotacion + exploracion) * math.log(1.0 + dias_sin_ver) * factor_verde
+
+
 def seleccionar_lote_ucb(conn: sqlite3.Connection, limite: int = LOTE_MICRO_SESION):
     """
-    Selecciona el lote de auditoría exclusivamente entre los 44 catálogos PDF oficiales,
-    ordenando por:
-      1. Nivel Prioritario: SKUs nunca sincronizados, siguiendo CATALOGOS_PRIORIDAD.
-      2. Nivel Re-Auditoría UCB Bayesiana para SKUs ya sincronizados (incluye agotados,
-         para que no acaparen el lote en cada corrida).
+    Selecciona el lote de auditoría dando prioridad estricta a los CUADRANTES VERDES:
+      1. Vírgenes de los 4 Cuadrantes Verdes (Escolar, Licencias, Sandalias/Botas Moda, Pantuflas).
+      2. Resto de Vírgenes según CATALOGOS_PRIORIDAD.
+      3. Re-Auditoría UCB Bayesiana ponderando con bono a los productos Verdes.
     """
     filas = conn.execute(
         """
@@ -316,49 +353,29 @@ def seleccionar_lote_ucb(conn: sqlite3.Connection, limite: int = LOTE_MICRO_SESI
     auditados_ucb = []
 
     for fila in filas:
-        id_ps, nombre, url, alpha, beta, stock_ant, ult_sinc, costo, origen_cat = fila
-        id_str = str(id_ps).strip()
-        alpha = float(alpha) if alpha else 1.0
-        beta = float(beta) if beta else 2.0
-        stock_ant = int(stock_ant if stock_ant is not None else -1)
+        id_str, nombre_usar, url_usar, alpha, beta, stock_ant, ult_sinc, origen_cat = _datos_base_lote(fila)
+        verde = es_sku_verde(nombre_usar, origen_cat)
 
-        # Si el SKU del PDF aún no tenía URL directa, usar el buscador oficial por ID
-        url_usar = (
-            str(url).strip()
-            if (url and str(url).strip().startswith("http"))
-            else f"https://www.priceshoes.com/buscar?q={id_str}"
-        )
-        nombre_usar = str(nombre).strip() if nombre else f"Modelo {id_str}"
-        orden_cat = ORDEN_PRIORIDAD_CAT.get(str(origen_cat).strip(), 999)
-
-        # Nivel 1: SKUs vírgenes del catálogo PDF (nunca sincronizados)
         if not ult_sinc:
-            score_virgen = 1000.0 - (orden_cat * 5.0)
+            orden_cat = ORDEN_PRIORIDAD_CAT.get(str(origen_cat).strip(), 999)
+            grupo_prio = 0 if verde else 1
+            score_virgen = 1200.0 - (orden_cat * 5.0) + (200.0 if verde else 0.0)
             virgenes_por_catalogo.append(
-                (orden_cat, id_str, score_virgen, nombre_usar, url_usar, alpha, beta, stock_ant, 15.0, origen_cat)
+                (grupo_prio, orden_cat, id_str, score_virgen, nombre_usar, url_usar, alpha, beta, stock_ant, 15.0, origen_cat)
             )
             continue
 
-        # Nivel 2: SKUs ya auditados puntuados por UCB Bayesiano
-        try:
-            fecha_ant = datetime.fromisoformat(str(ult_sinc))
-            dias_sin_ver = max(0.05, (ahora - fecha_ant).total_seconds() / 86400.0)
-        except Exception:
-            dias_sin_ver = 5.0
-
-        explotacion = alpha / beta
-        exploracion = 1.41 * (math.sqrt(alpha) / beta)
-        score_ucb = (explotacion + exploracion) * math.log(1.0 + dias_sin_ver)
+        dias_sin_ver = _dias_sin_ver(ult_sinc, ahora)
         auditados_ucb.append(
-            (score_ucb, id_str, nombre_usar, url_usar, alpha, beta, stock_ant, dias_sin_ver, origen_cat)
+            (_puntaje_ucb(alpha, beta, dias_sin_ver, verde=verde), id_str, nombre_usar, url_usar, alpha, beta, stock_ant,
+             dias_sin_ver, origen_cat)
         )
 
-    # Primero los vírgenes, respetando estrictamente la prioridad de los 44 catálogos
-    virgenes_por_catalogo.sort(key=lambda x: (x[0], x[1]))
+    virgenes_por_catalogo.sort(key=lambda x: (x[0], x[1], x[2]))
     auditados_ucb.sort(key=lambda x: x[0], reverse=True)
 
     lote_final = [
-        (item[2], item[1], item[3], item[4], item[5], item[6], item[7], item[8], item[9])
+        (item[3], item[2], item[4], item[5], item[6], item[7], item[8], item[9], item[10])
         for item in virgenes_por_catalogo[:limite]
     ]
 
@@ -371,27 +388,68 @@ def seleccionar_lote_ucb(conn: sqlite3.Connection, limite: int = LOTE_MICRO_SESI
 # ===========================================================================
 # EXTRACCIÓN DESDE LA PÁGINA
 # ===========================================================================
-def extraer_datos_reales_dom(page, id_ps: str) -> Tuple[float, Dict[str, int], str]:
-    """
-    Extrae el costo de socio real, el nombre oficial del producto y las tallas de la fila Vallejo
-    (soportando tanto numeración decimal de calzado como tallas CH, M, G, XG, UNI y Jeans).
-    """
-    costo_socio = 0.0
-    tallas_vallejo: Dict[str, int] = {}
-    nombre_detectado = ""
+def extraer_precio_publico(html: str, texto_pagina: str, id_ps: str) -> float:
+    for m in re.finditer(r'"price"\s*:\s*"?(\d+(?:\.\d+)?)"?', html or ""):
+        valor = float(m.group(1))
+        if valor > 0:
+            return valor
 
-    # Si entramos por URL de búsqueda (/buscar?q=...), abrir la ficha del producto si aparece en resultados
+    m_txt = re.search(
+        rf"ID\s*:?\s*{re.escape(str(id_ps))}\s*\$\s*([\d,]+(?:\.\d{{2}})?)",
+        texto_pagina or "",
+        re.IGNORECASE,
+    )
+    if m_txt:
+        return float(m_txt.group(1).replace(",", ""))
+    return 0.0
+
+
+def validar_costo_socio(costo_socio: float, precio_publico: float) -> Tuple[str, str]:
+    if costo_socio <= 0:
+        return "sin_lectura", "No se leyó costo de socio; se conserva el anterior."
+    if precio_publico <= 0:
+        return "sin_publico", "No se pudo leer el precio público para validar el costo."
+
+    ratio = costo_socio / precio_publico
+    if ratio >= 1.0:
+        return "sospechoso", (
+            f"Costo ${costo_socio:,.0f} >= público ${precio_publico:,.0f}: "
+            "posible lectura de otro producto o precio desactualizado."
+        )
+    if ratio > RATIO_COSTO_MAX_ESPERADO:
+        return "revisar", f"Descuento de socio de solo {(1 - ratio) * 100:.0f}% sobre ${precio_publico:,.0f}."
+    if ratio < RATIO_COSTO_MIN_ESPERADO:
+        return "revisar", f"Descuento de socio de {(1 - ratio) * 100:.0f}% sobre ${precio_publico:,.0f}: inusualmente alto."
+    return "ok", f"Costo validado: {(1 - ratio) * 100:.0f}% bajo el público ${precio_publico:,.0f}."
+
+
+PATRON_COSTO_SOCIO = re.compile(r"Socio:\s*[\r\n\s]*\$\s*([\d,]+(?:\.\d{2})?)", re.IGNORECASE)
+PATRON_BLOQUE_VALLEJO = re.compile(
+    r"Tienda\s+([\s\S]+?)\s+Ecommerce[\s\S]+?Vallejo\s*(?:Tu tienda)?\s*([\s\S]+)",
+    re.IGNORECASE,
+)
+PATRON_FIN_FILA_VALLEJO = re.compile(
+    r"(?:Centro|Naucalpan|Olivar|Ecatepec|Tlalnepantla|Iztapalapa|Arcos|Puebla|Le[oó]n|Guadalajara|a\s+\d+\s*km)",
+    re.IGNORECASE,
+)
+
+
+def _abrir_ficha_desde_busqueda(page, id_ps: str) -> None:
     try:
-        if "/buscar" in page.url:
-            enlace_prod = page.locator(f"a[href*='{id_ps}']").first
-            if enlace_prod.count() > 0:
-                href_p = enlace_prod.get_attribute("href")
-                if href_p:
-                    url_destino = href_p if href_p.startswith("http") else f"https://www.priceshoes.com{href_p}"
-                    page.goto(url_destino, timeout=30000, wait_until="domcontentloaded")
+        if "/buscar" not in page.url:
+            return
+        enlace_prod = page.locator(f"a[href*='{id_ps}']").first
+        if enlace_prod.count() == 0:
+            return
+        href_p = enlace_prod.get_attribute("href")
+        if href_p:
+            url_destino = href_p if href_p.startswith("http") else f"https://www.priceshoes.com{href_p}"
+            page.goto(url_destino, timeout=30000, wait_until="domcontentloaded")
     except Exception:
         pass
 
+
+def _esperar_bloque_socio(page) -> None:
     try:
         page.wait_for_function(
             "document.body && document.body.innerText.includes('Socio')",
@@ -400,24 +458,32 @@ def extraer_datos_reales_dom(page, id_ps: str) -> Tuple[float, Dict[str, int], s
     except Exception:
         pass
 
-    # Capturar título H1 real si está disponible
+
+def _leer_titulo_h1(page) -> str:
     try:
         loc_h1 = page.locator("h1").first
         if loc_h1.count() > 0:
             txt_h1 = loc_h1.inner_text().strip()
             if txt_h1 and len(txt_h1) > 3:
-                nombre_detectado = txt_h1
+                return txt_h1
     except Exception:
         pass
+    return ""
 
-    texto_pagina = page.locator("body").inner_text()
 
-    match_socio = re.search(
-        r"Socio:\s*[\r\n\s]*\$\s*([\d,]+(?:\.\d{2})?)", texto_pagina, re.IGNORECASE
-    )
-    if match_socio:
-        costo_socio = float(match_socio.group(1).replace(",", ""))
+def extraer_costo_socio(texto_pagina: str) -> float:
+    match_socio = PATRON_COSTO_SOCIO.search(texto_pagina)
+    return float(match_socio.group(1).replace(",", "")) if match_socio else 0.0
 
+
+def _leer_precio_publico(page, texto_pagina: str, id_ps: str) -> float:
+    try:
+        return extraer_precio_publico(page.content(), texto_pagina, id_ps)
+    except Exception:
+        return extraer_precio_publico("", texto_pagina, id_ps)
+
+
+def _abrir_modal_tiendas(page) -> None:
     try:
         btn_disp = page.locator("text=Ver disponibilidad en tiendas").first
         if btn_disp.count() > 0:
@@ -433,53 +499,53 @@ def extraer_datos_reales_dom(page, id_ps: str) -> Tuple[float, Dict[str, int], s
     except Exception as e:
         print(f"      ℹ️ Aviso al abrir modal de tiendas: {e}")
 
-    texto_modal = page.locator("body").inner_text()
 
+def _tallas_del_encabezado(encabezado_str: str) -> List[str]:
+    tallas_detectadas = re.findall(r"\b\d{2}\.[05]\b", encabezado_str)
+    if tallas_detectadas:
+        return tallas_detectadas
+
+    tokens_enc = [t.strip().upper() for t in re.split(r"[\s\t\r\n]+", encabezado_str) if t.strip()]
+    return [t for t in tokens_enc if PATRON_TALLA_VALIDA.match(t)]
+
+
+def extraer_tallas_vallejo(texto_modal: str) -> Dict[str, int]:
     if "TIENDAS CERCANAS" in texto_modal.upper():
-        partes = re.split(r"TIENDAS CERCANAS[^\n]*", texto_modal, flags=re.IGNORECASE)
-        zona_tabla = partes[-1]
+        zona_tabla = re.split(r"TIENDAS CERCANAS[^\n]*", texto_modal, flags=re.IGNORECASE)[-1]
     else:
         zona_tabla = texto_modal
 
-    match_bloque = re.search(
-        r"Tienda\s+([\s\S]+?)\s+Ecommerce[\s\S]+?Vallejo\s*(?:Tu tienda)?\s*([\s\S]+)",
-        zona_tabla,
-        re.IGNORECASE,
-    )
+    match_bloque = PATRON_BLOQUE_VALLEJO.search(zona_tabla)
+    if not match_bloque:
+        return {}
 
-    if match_bloque:
-        encabezado_str = match_bloque.group(1)
-        fila_vallejo_str = match_bloque.group(2)
+    tallas_detectadas = _tallas_del_encabezado(match_bloque.group(1))
+    fila_vallejo_limpia = PATRON_FIN_FILA_VALLEJO.split(match_bloque.group(2))[0]
+    tokens_vallejo = re.findall(r"(?:\b\d+\b|—|--|-)", fila_vallejo_limpia)
 
-        # 1. Intentar primero tallas de calzado con punto decimal (.0 o .5)
-        tallas_detectadas = re.findall(r"\b\d{2}\.[05]\b", encabezado_str)
+    tallas_vallejo: Dict[str, int] = {}
+    for i, talla in enumerate(tallas_detectadas):
+        tok = tokens_vallejo[i] if i < len(tokens_vallejo) else ""
+        tallas_vallejo[talla] = int(tok) if tok.isdigit() else 0
+    return tallas_vallejo
 
-        # 2. Si es ropa, jeans, calcetería o accesorio (sin decimales), extraer tokens válidos del encabezado
-        if not tallas_detectadas:
-            tokens_enc = [t.strip().upper() for t in re.split(r"[\s\t\r\n]+", encabezado_str) if t.strip()]
-            tallas_detectadas = [t for t in tokens_enc if PATRON_TALLA_VALIDA.match(t)]
 
-        if tallas_detectadas:
-            fila_vallejo_limpia = re.split(
-                r"(?:Centro|Naucalpan|Olivar|Ecatepec|Tlalnepantla|Iztapalapa|Arcos|Puebla|Le[oó]n|Guadalajara|a\s+\d+\s*km)",
-                fila_vallejo_str,
-                flags=re.IGNORECASE,
-            )[0]
+def extraer_datos_reales_dom(page, id_ps: str) -> Tuple[float, Dict[str, int], str, float]:
+    _abrir_ficha_desde_busqueda(page, id_ps)
+    _esperar_bloque_socio(page)
+    nombre_detectado = _leer_titulo_h1(page)
 
-            tokens_vallejo = re.findall(r"(?:\b\d+\b|—|--|-)", fila_vallejo_limpia)
-            for i, talla in enumerate(tallas_detectadas):
-                if i < len(tokens_vallejo):
-                    tok = tokens_vallejo[i]
-                    stock_val = int(tok) if tok.isdigit() else 0
-                    tallas_vallejo[talla] = stock_val
-                else:
-                    tallas_vallejo[talla] = 0
+    texto_pagina = page.locator("body").inner_text()
+    costo_socio = extraer_costo_socio(texto_pagina)
+    precio_publico = _leer_precio_publico(page, texto_pagina, id_ps)
 
-    return costo_socio, tallas_vallejo, nombre_detectado
+    _abrir_modal_tiendas(page)
+    tallas_vallejo = extraer_tallas_vallejo(page.locator("body").inner_text())
+
+    return costo_socio, tallas_vallejo, nombre_detectado, precio_publico
 
 
 def obtener_url_canonica(page) -> str:
-    """Devuelve la URL canónica de la ficha (/productos/...) o '' si la página no es una ficha."""
     try:
         loc_canon = page.locator("link[rel='canonical']")
         if loc_canon.count() > 0:
@@ -502,91 +568,90 @@ def pausa_antiban_lognormal() -> None:
 # ===========================================================================
 # AUDITORÍA DE UN SKU
 # ===========================================================================
-def auditar_sku(conn: sqlite3.Connection, page, item) -> str:
-    """
-    Audita un SKU y guarda el resultado. Devuelve:
-      'ok'      -> datos leídos y guardados
-      'agotado' -> ficha cargada pero sin Socio ni tallas
-      'fallo'   -> la página no es una ficha de producto (bloqueo, sesión vencida, SKU inexistente)
-    """
-    _score, id_ps, nombre, url, alpha_ant, beta_ant, stock_ant, dias_dt, _origen = item
+GAMMA_MEMORIA = 0.90
 
-    page.goto(url, timeout=35000, wait_until="domcontentloaded")
-    costo_real, tallas_reales, nombre_h1 = extraer_datos_reales_dom(page, id_ps)
 
-    # Si no terminamos en una ficha de producto no se toca la BD: evita marcar como agotado
-    # un SKU solo porque la página falló, pidió login o bloqueó la sesión.
-    if "/productos/" not in page.url:
-        print("   ⚠️ No se llegó a una ficha de producto (¿sesión vencida, bloqueo o SKU inexistente?).")
-        return "fallo"
-
-    url_canonica = obtener_url_canonica(page)
+def _nombre_a_guardar(nombre: str, nombre_h1: str) -> str:
     es_placeholder = (not nombre.strip()) or bool(re.match(r"^Modelo\s+\S+$", nombre.strip(), re.IGNORECASE))
-    nombre_guardar = nombre_h1 if (nombre_h1 and es_placeholder) else nombre
-    ahora_iso = datetime.now().isoformat()
+    return nombre_h1 if (nombre_h1 and es_placeholder) else nombre
 
-    # --- Sin costo ni tallas: producto agotado ---
-    if costo_real == 0.0 and not tallas_reales:
-        print("   ⚠️ Producto agotado o sin bloque de Socio activo en la página.")
-        conn.execute(
-            """
-            UPDATE zapatos_candidatos
-            SET url_real = COALESCE(NULLIF(?, ''), url_real),
-                ultima_sincronizacion = ?,
-                stock_total_anterior = 0,
-                tier = 'Z'
-            WHERE id_ps = ?
-            """,
-            (url_canonica, ahora_iso, id_ps),
-        )
-        conn.commit()
-        return "agotado"
 
-    # --- Hay costo pero no se leyeron tallas (modal no abrió): no tocar stock ni modelo bayesiano ---
-    if not tallas_reales:
-        print(f"   ⚠️ Costo ${costo_real:,.2f} leído, pero sin tabla de tallas: se conserva el stock anterior.")
-        conn.execute(
-            """
-            UPDATE zapatos_candidatos
-            SET nombre_modelo = COALESCE(NULLIF(?, ''), nombre_modelo),
-                costo_socio = ?,
-                url_real = COALESCE(NULLIF(?, ''), url_real),
-                ultima_sincronizacion = ?
-            WHERE id_ps = ?
-            """,
-            (nombre_guardar, costo_real, url_canonica, ahora_iso, id_ps),
-        )
-        conn.commit()
-        return "ok"
+def _guardar_agotado(conn: sqlite3.Connection, id_ps: str, url_canonica: str, ahora_iso: str) -> None:
+    conn.execute(
+        """
+        UPDATE zapatos_candidatos
+        SET url_real = COALESCE(NULLIF(?, ''), url_real),
+            ultima_sincronizacion = ?,
+            stock_total_anterior = 0,
+            tier = 'Z'
+        WHERE id_ps = ?
+        """,
+        (url_canonica, ahora_iso, id_ps),
+    )
+    conn.execute("DELETE FROM stock_tienda WHERE id_ps = ? AND tienda_id = 1", (id_ps,))
+    conn.commit()
 
-    # --- Caso normal: costo y/o tallas leídos ---
-    stock_total_actual = sum(tallas_reales.values())
-    gamma = 0.90
+
+def _guardar_costo_sin_tallas(
+    conn: sqlite3.Connection,
+    id_ps: str,
+    nombre_guardar: str,
+    costo_real: float,
+    precio_publico: float,
+    estado_val: str,
+    url_canonica: str,
+    ahora_iso: str,
+) -> None:
+    tipo_calc = inv.clasificar_tipo_producto(nombre_guardar)
+    conn.execute(
+        """
+        UPDATE zapatos_candidatos
+        SET nombre_modelo = COALESCE(NULLIF(?, ''), nombre_modelo),
+            costo_socio = ?,
+            precio_publico = CASE WHEN ? > 0 THEN ? ELSE precio_publico END,
+            costo_validacion = ?,
+            url_real = COALESCE(NULLIF(?, ''), url_real),
+            ultima_sincronizacion = ?,
+            tipo_producto = CASE WHEN ? != '' THEN ? ELSE tipo_producto END
+        WHERE id_ps = ?
+        """,
+        (nombre_guardar, costo_real, precio_publico, precio_publico, estado_val, url_canonica, ahora_iso,
+         tipo_calc, tipo_calc, id_ps),
+    )
+    conn.commit()
+
+
+def _actualizar_modelo_ventas(
+    alpha_ant: float, beta_ant: float, stock_ant, stock_total_actual: int, dias_dt: float
+) -> Tuple[float, float]:
     if stock_ant is None or stock_ant < 0:
-        nuevo_alpha, nuevo_beta = alpha_ant, beta_ant
-    else:
-        ventas_detectadas = max(0, stock_ant - stock_total_actual)
-        nuevo_alpha = (gamma * alpha_ant) + ventas_detectadas
-        nuevo_beta = (gamma * beta_ant) + max(0.1, dias_dt)
+        return alpha_ant, beta_ant
+    ventas_detectadas = max(0, stock_ant - stock_total_actual)
+    nuevo_alpha = (GAMMA_MEMORIA * alpha_ant) + ventas_detectadas
+    nuevo_beta = (GAMMA_MEMORIA * beta_ant) + max(0.1, dias_dt)
+    return nuevo_alpha, nuevo_beta
 
-    velocidad = round(nuevo_alpha / nuevo_beta, 2)
 
-    activo = 1
+def _clasificar_tier(stock_total_actual: int, stock_ant, nuevo_beta: float, velocidad: float) -> Tuple[str, int]:
     if stock_total_actual == 0 and stock_ant == 0 and nuevo_beta >= 4.0:
-        tier = "Z"
-        activo = 0
-    elif velocidad >= 2.5 and stock_total_actual > 0:
-        tier = "S"
-    elif velocidad >= 0.8 and stock_total_actual > 0:
-        tier = "A"
-    else:
-        tier = "B"
+        return "Z", 0
+    if velocidad >= 2.5 and stock_total_actual > 0:
+        return "S", 1
+    if velocidad >= 0.8 and stock_total_actual > 0:
+        return "A", 1
+    return "B", 1
 
+
+def _guardar_auditoria_completa(
+    conn: sqlite3.Connection, id_ps: str, valores: tuple, tallas_reales: Dict[str, int], ahora_iso: str
+) -> None:
     conn.execute(
         """
         UPDATE zapatos_candidatos
         SET nombre_modelo = COALESCE(NULLIF(?, ''), nombre_modelo),
             costo_socio = CASE WHEN ? > 0 THEN ? ELSE costo_socio END,
+            precio_publico = CASE WHEN ? > 0 THEN ? ELSE precio_publico END,
+            costo_validacion = ?,
             url_real = COALESCE(NULLIF(?, ''), url_real),
             alpha = ?,
             beta = ?,
@@ -594,13 +659,74 @@ def auditar_sku(conn: sqlite3.Connection, page, item) -> str:
             stock_total_anterior = ?,
             ultima_sincronizacion = ?,
             tier = ?,
-            activo_monitoreo = ?
+            activo_monitoreo = ?,
+            tipo_producto = ?
         WHERE id_ps = ?
         """,
+        valores + (id_ps,),
+    )
+
+    conn.execute("DELETE FROM historial_stock_21_dias WHERE id_ps = ?", (id_ps,))
+    conn.executemany(
+        "INSERT INTO historial_stock_21_dias (id_ps, talla, stock_vallejo, fecha) VALUES (?, ?, ?, ?)",
+        [(id_ps, talla, cant, ahora_iso) for talla, cant in tallas_reales.items()],
+    )
+
+    # Sincronización directa hacia `stock_tienda` (Tienda 1: Vallejo) y alertas
+    filas_inv = [
+        {"tienda_id": 1, "tienda_nombre": "Vallejo", "talla": talla, "cantidad": cant}
+        for talla, cant in tallas_reales.items()
+    ]
+    inv.guardar_revision(conn, id_ps, 1, filas_inv, ahora=datetime.now())
+    conn.commit()
+
+
+def auditar_sku(conn: sqlite3.Connection, page, item) -> str:
+    _score, id_ps, nombre, url, alpha_ant, beta_ant, stock_ant, dias_dt, origen_cat = item
+
+    page.goto(url, timeout=35000, wait_until="domcontentloaded")
+    costo_real, tallas_reales, nombre_h1, precio_publico = extraer_datos_reales_dom(page, id_ps)
+
+    if "/productos/" not in page.url:
+        print("   ⚠️ No se llegó a una ficha de producto (¿sesión vencida, bloqueo o SKU inexistente?).")
+        return "fallo"
+
+    url_canonica = obtener_url_canonica(page)
+    nombre_guardar = _nombre_a_guardar(nombre, nombre_h1)
+    ahora_iso = datetime.now().isoformat()
+
+    if costo_real == 0.0 and not tallas_reales:
+        print("   ⚠️ Producto agotado o sin bloque de Socio activo en la página.")
+        _guardar_agotado(conn, id_ps, url_canonica, ahora_iso)
+        return "agotado"
+
+    estado_val, mensaje_val = validar_costo_socio(costo_real, precio_publico)
+    if estado_val != "ok":
+        print(f"   🔎 Validación de costo [{estado_val}]: {mensaje_val}")
+
+    if not tallas_reales:
+        print(f"   ⚠️ Costo ${costo_real:,.2f} leído, pero sin tabla de tallas: se conserva el stock anterior.")
+        _guardar_costo_sin_tallas(
+            conn, id_ps, nombre_guardar, costo_real, precio_publico, estado_val, url_canonica, ahora_iso
+        )
+        return "ok"
+
+    stock_total_actual = sum(tallas_reales.values())
+    nuevo_alpha, nuevo_beta = _actualizar_modelo_ventas(alpha_ant, beta_ant, stock_ant, stock_total_actual, dias_dt)
+    velocidad = round(nuevo_alpha / nuevo_beta, 2)
+    tier, activo = _clasificar_tier(stock_total_actual, stock_ant, nuevo_beta, velocidad)
+    tipo_prod = inv.clasificar_tipo_producto(nombre_guardar)
+
+    _guardar_auditoria_completa(
+        conn,
+        id_ps,
         (
             nombre_guardar,
             costo_real,
             costo_real,
+            precio_publico,
+            precio_publico,
+            estado_val,
             url_canonica,
             round(nuevo_alpha, 3),
             round(nuevo_beta, 3),
@@ -609,18 +735,17 @@ def auditar_sku(conn: sqlite3.Connection, page, item) -> str:
             ahora_iso,
             tier,
             activo,
-            id_ps,
+            tipo_prod,
         ),
+        tallas_reales,
+        ahora_iso,
     )
 
-    conn.execute("DELETE FROM historial_stock_21_dias WHERE id_ps = ?", (id_ps,))
-    conn.executemany(
-        "INSERT INTO historial_stock_21_dias (id_ps, talla, stock_vallejo) VALUES (?, ?, ?)",
-        [(id_ps, talla, cant) for talla, cant in tallas_reales.items()],
+    _, cuadrante = inv.clasificar_matriz_maslow(nombre_guardar, origen_cat, tipo_prod)
+    print(
+        f"   [{cuadrante}] 💰 Costo Socio: ${costo_real:,.2f} | 🏷️ Público: ${precio_publico:,.2f} [{estado_val}] "
+        f"| 📦 Stock Vallejo: {stock_total_actual} uds"
     )
-    conn.commit()
-
-    print(f"   💰 Costo Socio: ${costo_real:,.2f} | 📦 Stock Vallejo: {stock_total_actual} uds")
     print(f"   📈 Velocidad: {velocidad}/día | 🏆 Tier: {tier} | Tallas: {tallas_reales}")
     return "ok"
 
@@ -630,11 +755,11 @@ def auditar_sku(conn: sqlite3.Connection, page, item) -> str:
 # ===========================================================================
 def ejecutar_recolector_inteligente() -> None:
     print("=" * 80)
-    print("🧠 MOTOR BAYESIANO QUANT-COMMERCE: Barrido Exclusivo 44 Catálogos PDF (Vallejo)")
+    print("🧠 MOTOR BAYESIANO QUANT-COMMERCE: Barrido Priorizado en VERDES (Vallejo)")
     print("=" * 80)
 
     if not os.path.exists(RUTA_SESION):
-        print(f"❌ No se encontró '{RUTA_SESION}'. Ejecuta primero el inicio de sesión.")
+        print(f"❌ No se encontró '{RUTA_SESION}'. Ejecuta primero: python paso12_login_socio.py")
         return
 
     Path("data").mkdir(exist_ok=True)
@@ -651,9 +776,12 @@ def ejecutar_recolector_inteligente() -> None:
             return
 
         resumen_cats: Dict[str, int] = {}
+        verdes_cnt = 0
         for item in lote:
             resumen_cats[item[8]] = resumen_cats.get(item[8], 0) + 1
-        print(f"\n🎯 Lote seleccionado: {len(lote)} SKUs oficiales de Catálogos PDF:")
+            if es_sku_verde(item[2], item[8]):
+                verdes_cnt += 1
+        print(f"\n🎯 Lote seleccionado: {len(lote)} SKUs ({verdes_cnt} en Cuadrantes VERDES):")
         for c_nom, cant in resumen_cats.items():
             print(f"   📘 {c_nom}: {cant} SKUs en este lote")
         print()
@@ -697,7 +825,7 @@ def ejecutar_recolector_inteligente() -> None:
                 browser.close()
     finally:
         conn.close()
-    print("\n✅ ¡Micro-sesión de Catálogos PDF finalizada y guardada en SQLite!")
+    print("\n✅ ¡Micro-sesión de Catálogos PDF finalizada y sincronizada en `stock_tienda`!")
 
 
 if __name__ == "__main__":

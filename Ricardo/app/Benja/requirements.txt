@@ -1,0 +1,26 @@
+# Dependencias del proyecto Price Shoes -> Mercado Libre
+# Python recomendado: 3.11 o 3.12 (mínimo 3.9).
+#
+# Instalación:
+#   python -m venv venv
+#   .\venv\Scripts\activate            (Linux/Mac: source venv/bin/activate)
+#   pip install -r requirements.txt
+#   playwright install chromium        (descarga el navegador que usa Playwright)
+
+# --- Panel y cálculos (paso4, paso5, exportar_mercadolibre) ---
+streamlit>=1.30
+pandas>=2.0
+numpy>=1.24
+
+# --- Navegación automática (paso3, paso12, revisar_existencias) ---
+playwright>=1.40
+
+# --- Imágenes y descarga de fotos (paso6) ---
+Pillow>=9.1
+curl_cffi>=0.6
+
+# --- Lectura de catálogos PDF con OCR (paso0) ---
+# Solo hace falta si vas a volver a extraer los SKUs de los PDF.
+# En Python 3.13 puede no instalarse: usa 3.12 si falla.
+pymupdf>=1.24
+rapidocr_onnxruntime>=1.3
