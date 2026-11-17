@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ========================================================================================
-PASO 4: PANEL DE CONTROL E INVENTARIO EN STREAMLIT (v2 · Matriz Maslow + Multi-Tienda)
+PASO 4: PANEL DE CONTROL E INVENTARIO EN STREAMLIT (VISTA COMPLETA 8,165 SKUs + MASLOW)
 ========================================================================================
 """
 
@@ -22,7 +22,7 @@ import inventario_tiendas as inv
 import paso5_motor_financiero as finanzas
 
 st.set_page_config(
-    page_title="Zapatería Vallejo · Control e Inventario",
+    page_title="Zapatería Vallejo · Control e Inventario Completo",
     page_icon="👟",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -43,6 +43,10 @@ FOTOS_REQUERIDAS = 4
 STOCK_MIN_DEFAULT = 5
 GANANCIA_MIN_DEFAULT = 100.0
 
+ALCANCE_TODOS = "🌐 Todos los SKUs del catálogo (Vista completa)"
+ALCANCE_CON_COSTO = "💰 Con Costo y Cálculo Financiero (> $0)"
+ALCANCE_CON_STOCK = "📦 Solo con Inventario > 0 en la tienda"
+
 TABLAS_FINANCIERAS = (
     "matriz_financiera",
     "auditoria_financiera",
@@ -56,11 +60,11 @@ ALIAS: Dict[str, List[str]] = {
     "sku": ["SKU Interno", "sku_interno", "sku_interno_ml"],
     "modelo": ["Modelo", "nombre_modelo", "nombre"],
     "enlace": ["Enlace Original", "url_real", "url"],
-    "costo": ["Costo ($)", "costo_socio", "costo"],
+    "costo": ["Costo ($)", "costo_socio", "costo_base", "costo"],
     "stock": ["Stock Publicable", "stock_publicable", "stock_publicable_total", "stock_total_anterior", "stock"],
     "precio": ["Precio Sugerido", "precio_sugerido", "precio_ml", "precio_venta"],
     "ganancia": ["Ganancia Neta", "ganancia_neta", "utilidad_neta_ml", "utilidad_neta"],
-    "catalogo": ["Catálogo", "origen_catalogo"],
+    "catalogo": ["Catálogo", "origen_catalogo", "catalogo_origen"],
     "subir": ["Subir a ML", "subir_ml"],
 }
 
@@ -117,14 +121,14 @@ ORIGEN_PDF = "📘 Solo catálogos PDF"
 ORIGEN_TODO = "🌐 Todo (incluye Web)"
 ORIGEN_WEB = "🕸️ Solo Web / sin catálogo"
 
-ORDEN_DEFAULT = "Recomendados primero + mayor ganancia"
+ORDEN_DEFAULT = "Recomendados + Stock + Mayor ganancia"
 OPCIONES_ORDEN = [
     ORDEN_DEFAULT,
+    "Stock Publicable",
     "Ganancia Neta",
     "Margen (%)",
     "Precio Sugerido",
     "Costo ($)",
-    "Stock Publicable",
     "Sobreprecio vs PS (%)",
     "Ganancia directa ($)",
     "ID Price Shoes",
@@ -132,9 +136,9 @@ OPCIONES_ORDEN = [
 ]
 
 FILTRO_KEYS = [
-    "f_etapa", "f_cuadrante", "f_origen", "f_catalogos", "f_semaforo", "f_busqueda",
-    "f_costo", "f_precio", "f_ganancia", "f_margen", "f_stock", "f_fotos", "f_orden",
-    "f_asc", "f_tipos", "f_inventario",
+    "f_alcance", "f_etapa", "f_cuadrante", "f_origen", "f_catalogos", "f_semaforo",
+    "f_busqueda", "f_costo", "f_precio", "f_ganancia", "f_margen", "f_stock",
+    "f_fotos", "f_orden", "f_asc", "f_tipos",
 ]
 
 
@@ -206,7 +210,7 @@ def _num(df: pd.DataFrame, campo: str, default: Any = 0.0) -> pd.Series:
 
 
 # ----------------------------------------------------------------------------------
-# CARGA DE DATOS (con caché)
+# CARGA DE DATOS (100% DE LOS SKUs, SIN FILTROS OCULTOS)
 # ----------------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def indexar_carpetas_fotos(firma: Tuple[float, ...]) -> Dict[str, List[Path]]:
@@ -232,9 +236,6 @@ def indexar_carpetas_fotos(firma: Tuple[float, ...]) -> Dict[str, List[Path]]:
     return mapa
 
 
-PALABRAS_CSV_FINANCIERO = ("financ", "matriz", "audit", "catalogo", "ml")
-
-
 def _leer_mapa_origen(conn: sqlite3.Connection, tablas: Set[str]) -> Dict[str, str]:
     mapa_origen: Dict[str, str] = {}
     if "zapatos_candidatos" not in tablas:
@@ -249,47 +250,6 @@ def _leer_mapa_origen(conn: sqlite3.Connection, tablas: Set[str]) -> Dict[str, s
     return mapa_origen
 
 
-def _leer_tabla_no_vacia(conn: sqlite3.Connection, tabla: str) -> Optional[pd.DataFrame]:
-    try:
-        df_tmp = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
-    except Exception:
-        return None
-    return None if df_tmp.empty else df_tmp
-
-
-def _leer_tabla_base(conn: sqlite3.Connection, tablas: Set[str]) -> Optional[pd.DataFrame]:
-    for tabla in TABLAS_FINANCIERAS:
-        df_tmp = _leer_tabla_no_vacia(conn, tabla) if tabla in tablas else None
-        if df_tmp is not None:
-            return df_tmp
-
-    if "zapatos_candidatos" in tablas:
-        df_tmp = pd.read_sql_query("SELECT * FROM zapatos_candidatos", conn)
-        if not df_tmp.empty:
-            return df_tmp
-    return None
-
-
-def _leer_csv_utilizable(csv_path: Path) -> Optional[pd.DataFrame]:
-    if not any(k in csv_path.name.lower() for k in PALABRAS_CSV_FINANCIERO):
-        return None
-    try:
-        df_csv = pd.read_csv(csv_path)
-    except Exception:
-        return None
-    return None if (df_csv.empty or len(df_csv.columns) < 5) else df_csv
-
-
-def _elegir_base_con_csv(df_base: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
-    if not DIR_DATA.exists():
-        return df_base
-    for csv_path in sorted(DIR_DATA.glob("*.csv")):
-        df_csv = _leer_csv_utilizable(csv_path)
-        if df_csv is not None and (df_base is None or _col(df_csv, "precio") is not None):
-            return df_csv
-    return df_base
-
-
 def leer_fuentes() -> Tuple[Optional[pd.DataFrame], Dict[str, str]]:
     mapa_origen: Dict[str, str] = {}
     df_base: Optional[pd.DataFrame] = None
@@ -298,9 +258,10 @@ def leer_fuentes() -> Tuple[Optional[pd.DataFrame], Dict[str, str]]:
         with closing(sqlite3.connect(RUTA_BD)) as conn:
             tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             mapa_origen = _leer_mapa_origen(conn, tablas)
-            df_base = _leer_tabla_base(conn, tablas)
+            if "zapatos_candidatos" in tablas:
+                df_base = pd.read_sql_query("SELECT * FROM zapatos_candidatos", conn)
 
-    return _elegir_base_con_csv(df_base), mapa_origen
+    return df_base, mapa_origen
 
 
 VALORES_SUBIR_VERDADEROS = ["true", "1", "si", "sí", "x", "yes"]
@@ -318,7 +279,11 @@ def _precio_y_ganancia(df: pd.DataFrame, costo: pd.Series, modelo: pd.Series) ->
     pares = [calcular_precio_y_ganancia_fallback(c, m) for c, m in zip(costo, modelo)]
     precio_fb = pd.Series([p for p, _ in pares], index=df.index)
     ganancia_fb = pd.Series([g for _, g in pares], index=df.index)
-    return _num(df, "precio", precio_fb), _num(df, "ganancia", ganancia_fb)
+    p_col = _num(df, "precio", 0.0)
+    g_col = _num(df, "ganancia", 0.0)
+    precio_final = pd.Series(np.where(p_col > 0, p_col, precio_fb), index=df.index)
+    ganancia_final = pd.Series(np.where(p_col > 0, g_col, ganancia_fb), index=df.index)
+    return precio_final, ganancia_final
 
 
 def _armar_inventario(
@@ -341,13 +306,19 @@ def _armar_inventario(
         index=df.index,
     )
 
+    enlace = _texto(df, "enlace")
+    enlace = pd.Series(
+        [u if u.startswith("http") else f"https://www.priceshoes.com/buscar?q={i}" for u, i in zip(enlace, id_limpio)],
+        index=df.index,
+    )
+
     return pd.DataFrame(
         {
             "ID Price Shoes": id_limpio,
             "SKU Interno": sku,
             "Catálogo": catalogo,
             "Modelo": modelo,
-            "Enlace Original": _texto(df, "enlace"),
+            "Enlace Original": enlace,
             "Costo ($)": costo.round(2),
             "Precio Sugerido": precio.round(2),
             "Ganancia Neta": ganancia.round(2),
@@ -359,8 +330,9 @@ def _armar_inventario(
     )
 
 
-@st.cache_data(show_spinner="Cargando inventario…")
+@st.cache_data(show_spinner="Cargando catálogo completo (8,165 SKUs)…")
 def cargar_datos_inventario(firma: Tuple[float, ...]) -> pd.DataFrame:
+    """Carga TODOS los SKUs de la base de datos sin ocultar los que aún no tienen foto o costo."""
     df_base, mapa_origen = leer_fuentes()
     if df_base is None or df_base.empty:
         return pd.DataFrame()
@@ -377,15 +349,15 @@ def cargar_datos_inventario(firma: Tuple[float, ...]) -> pd.DataFrame:
         index=df.index,
     )
     costo = _num(df, "costo", 0.0)
-    stock_raw = _num(df, "stock", 0)
 
-    valido = (id_limpio != "") & ~((costo <= 0) & (num_fotos == 0) & (stock_raw <= 0))
+    # Solo se descartan filas con ID vacío; se conservan los 8,165 SKUs completos
+    valido = id_limpio != ""
     df, raw_id, id_limpio, num_fotos, costo = (x[valido] for x in (df, raw_id, id_limpio, num_fotos, costo))
     if df.empty:
         return pd.DataFrame()
 
     out = _armar_inventario(df, raw_id, id_limpio, num_fotos, costo, mapa_origen)
-    out = out.sort_values("Ganancia Neta", ascending=False).drop_duplicates("ID Price Shoes")
+    out = out.sort_values(["Costo ($)", "Ganancia Neta"], ascending=[False, False]).drop_duplicates("ID Price Shoes")
     return out.reset_index(drop=True)
 
 
@@ -393,19 +365,22 @@ def evaluar_semaforo(df: pd.DataFrame, min_stock: int, min_ganancia: float) -> p
     df = df.copy()
     semaforo: List[str] = []
     diagnostico: List[str] = []
-    for fotos, stock, gan in zip(df["_num_fotos"], df["Stock Publicable"], df["Ganancia Neta"]):
-        if fotos >= FOTOS_REQUERIDAS and stock >= min_stock and gan >= min_ganancia:
+    for costo, fotos, stock, gan in zip(df["Costo ($)"], df["_num_fotos"], df["Stock Publicable"], df["Ganancia Neta"]):
+        if costo <= 0:
+            semaforo.append(NO_RECOMENDADO)
+            diagnostico.append("⏳ Pendiente extraer costo de socio (`python ampliar_base_catalogo.py`)")
+        elif fotos >= FOTOS_REQUERIDAS and stock >= min_stock and gan >= min_ganancia:
             semaforo.append(RECOMENDADO)
             diagnostico.append(f"✅ Listo para publicar ({FOTOS_REQUERIDAS}/{FOTOS_REQUERIDAS} HD)")
-        elif fotos < FOTOS_REQUERIDAS:
-            semaforo.append(NO_RECOMENDADO)
-            diagnostico.append(f"Faltan fotografías HD ({FOTOS_REQUERIDAS - fotos}/{FOTOS_REQUERIDAS})")
         elif stock < min_stock:
             semaforo.append(NO_RECOMENDADO)
-            diagnostico.append(f"Stock bajo ({stock} pares) · Fotos ({fotos}/{FOTOS_REQUERIDAS})")
+            diagnostico.append(f"Stock bajo en tienda ({stock} pzas) · Fotos ({fotos}/{FOTOS_REQUERIDAS})")
+        elif fotos < FOTOS_REQUERIDAS:
+            semaforo.append(NO_RECOMENDADO)
+            diagnostico.append(f"Con stock ({stock} pzas) · Faltan fotos HD ({fotos}/{FOTOS_REQUERIDAS})")
         else:
             semaforo.append(NO_RECOMENDADO)
-            diagnostico.append(f"Margen ajustado · Fotos ({fotos}/{FOTOS_REQUERIDAS})")
+            diagnostico.append(f"Margen ajustado (${gan:,.0f}) · Fotos ({fotos}/{FOTOS_REQUERIDAS})")
     df["Semáforo"] = semaforo
     df["Diagnóstico Técnico"] = diagnostico
     return df
@@ -520,31 +495,6 @@ def mostrar_alertas(tienda_id: int, tienda_nombre: str, umbral: int) -> None:
     else:
         st.info(f"Las {len(alertas)} alertas de pausa ya están marcadas como atendidas.")
 
-    df_alertas = pd.DataFrame(alertas).rename(columns={
-        "id_ps": "ID Price Shoes", "nombre": "Modelo", "tipo": "Tipo", "stock_total": "Piezas en tienda",
-        "fecha_creada": "Alerta desde", "fecha_actualizada": "Última revisión", "atendida": "Ya pausado",
-    })
-    df_alertas["Ya pausado"] = df_alertas["Ya pausado"].astype(bool)
-    columnas = ["Ya pausado", "ID Price Shoes", "Modelo", "Tipo", "Piezas en tienda", "Alerta desde", "Última revisión"]
-    editado = st.data_editor(
-        df_alertas[columnas + ["id"]],
-        hide_index=True,
-        use_container_width=True,
-        column_config={"id": None},
-        disabled=[c for c in columnas if c != "Ya pausado"],
-        key=f"alertas_{tienda_id}",
-    )
-    cambios = [
-        (int(id_alerta), bool(nuevo))
-        for id_alerta, nuevo, previo in zip(editado["id"], editado["Ya pausado"], df_alertas["Ya pausado"])
-        if bool(nuevo) != bool(previo)
-    ]
-    if cambios:
-        with closing(inv.conectar(RUTA_BD)) as conn:
-            for id_alerta, atendida in cambios:
-                inv.marcar_alerta_atendida(conn, id_alerta, atendida)
-        st.rerun()
-
 
 def guardar_seleccion_si_cambio(tienda_id: int) -> None:
     actual = set(st.session_state.seleccion_ml)
@@ -560,7 +510,7 @@ def guardar_seleccion_si_cambio(tienda_id: int) -> None:
 
 
 # ----------------------------------------------------------------------------------
-# FILTROS (barra lateral)
+# FILTROS (barra lateral sin ocultar el catálogo por defecto)
 # ----------------------------------------------------------------------------------
 def slider_rango(etiqueta: str, serie: pd.Series, key: str, formato: str = "%.0f") -> Optional[Tuple[float, float]]:
     lo, hi = float(serie.min()), float(serie.max())
@@ -582,14 +532,33 @@ FILTROS_DE_RANGO = (
 )
 
 
-def _filtrar_matriz_y_tipo(sb, df: pd.DataFrame) -> pd.DataFrame:
+def _filtrar_alcance_y_matriz(sb, df: pd.DataFrame) -> pd.DataFrame:
+    n_todos = len(df)
+    n_costo = int((df["Costo ($)"] > 0).sum())
+    n_stock = int((df["Stock Publicable"] > 0).sum())
+
+    alcance = sb.radio(
+        "👁️ Alcance del Catálogo",
+        [ALCANCE_TODOS, ALCANCE_CON_COSTO, ALCANCE_CON_STOCK],
+        index=0,
+        format_func=lambda op: (
+            f"{op} ({n_todos:,})" if op == ALCANCE_TODOS
+            else (f"{op} ({n_costo:,})" if op == ALCANCE_CON_COSTO else f"{op} ({n_stock:,})")
+        ),
+        key="f_alcance",
+    )
+    if alcance == ALCANCE_CON_COSTO:
+        df = df[df["Costo ($)"] > 0]
+    elif alcance == ALCANCE_CON_STOCK:
+        df = df[df["Stock Publicable"] > 0]
+
     conteo_etapas = df["Etapa Maslow"].value_counts()
     opciones_etapa = [inv.ETAPA_VERDE, inv.ETAPA_NARANJA, inv.ETAPA_GRIS]
     etapas = sb.multiselect(
-        "🎯 Etapa Matriz Maslow",
+        "🎯 Etapa Matriz Maslow (vacío = todas)",
         opciones_etapa,
-        default=[inv.ETAPA_VERDE],
-        format_func=lambda e: f"{e} ({conteo_etapas.get(e, 0)})",
+        default=[],
+        format_func=lambda e: f"{e} ({conteo_etapas.get(e, 0):,})",
         key="f_etapa",
     )
     if etapas:
@@ -600,7 +569,7 @@ def _filtrar_matriz_y_tipo(sb, df: pd.DataFrame) -> pd.DataFrame:
     cuadrantes = sb.multiselect(
         "🟢 Cuadrante específico (vacío = todos)",
         opciones_cuad,
-        format_func=lambda c: f"{c} ({conteo_cuad.get(c, 0)})",
+        format_func=lambda c: f"{c} ({conteo_cuad.get(c, 0):,})",
         key="f_cuadrante",
     )
     if cuadrantes:
@@ -611,15 +580,11 @@ def _filtrar_matriz_y_tipo(sb, df: pd.DataFrame) -> pd.DataFrame:
     tipos = sb.multiselect(
         "👟 Tipos de producto (vacío = todos)",
         opciones_tipo,
-        format_func=lambda t: f"{t} ({conteo_tipos[t]})",
+        format_func=lambda t: f"{t} ({conteo_tipos[t]:,})",
         key="f_tipos",
     )
     if tipos:
         df = df[df["Tipo"].isin(tipos)]
-
-    tiene_stock_positivo = int((df["Stock Publicable"] > 0).sum()) > 0
-    if sb.checkbox("Solo con inventario en la tienda", value=tiene_stock_positivo, key="f_inventario"):
-        df = df[df["Stock Publicable"] > 0]
     return df
 
 
@@ -642,7 +607,7 @@ def _filtrar_origen_y_catalogo(sb, df: pd.DataFrame) -> pd.DataFrame:
     elegidos = sb.multiselect(
         "📘 Catálogos (vacío = todos)",
         opciones_cat,
-        format_func=lambda c: f"{c} ({conteo[c]} SKUs)",
+        format_func=lambda c: f"{c} ({conteo[c]:,} SKUs)",
         key="f_catalogos",
     )
     return df[df["Catálogo"].isin(elegidos)] if elegidos else df
@@ -701,7 +666,7 @@ def _ordenar(sb, df: pd.DataFrame) -> pd.DataFrame:
         return df.sort_values(orden, ascending=ascendente)
     return (
         df.assign(_r=df["Semáforo"] != RECOMENDADO)
-        .sort_values(["_r", "Ganancia Neta", "Stock Publicable"], ascending=[True, False, False])
+        .sort_values(["_r", "Stock Publicable", "Ganancia Neta"], ascending=[True, False, False])
         .drop(columns="_r")
     )
 
@@ -711,7 +676,7 @@ def aplicar_filtros(df_total: pd.DataFrame) -> pd.DataFrame:
     sb.header("🔎 Filtros de Auditoría")
     sb.button("🧹 Limpiar filtros", on_click=resetear_filtros, use_container_width=True)
 
-    df = _filtrar_matriz_y_tipo(sb, df_total)
+    df = _filtrar_alcance_y_matriz(sb, df_total)
     df = _filtrar_origen_y_catalogo(sb, df)
     df = _filtrar_semaforo(sb, df)
     df = _filtrar_busqueda(sb, df)
@@ -731,29 +696,47 @@ COLUMNAS_MATRIZ = [
 ]
 
 
+def _mostrar_radiografia_global(df_total: pd.DataFrame) -> None:
+    """Muestra el estado completo de los 8,165 SKUs de la base de datos."""
+    st.markdown("#### 📊 Radiografía Global del Catálogo en Base de Datos")
+    g1, g2, g3, g4, g5 = st.columns(5)
+    con_costo = df_total[df_total["Costo ($)"] > 0]
+    con_stock = df_total[df_total["Stock Publicable"] > 0]
+    verdes_tot = df_total[df_total["Etapa Maslow"] == inv.ETAPA_VERDE]
+
+    g1.metric("📘 Catálogo Total en BD", f"{len(df_total):,} SKUs")
+    g2.metric("🟢 Total en Cuadrantes Verdes", f"{len(verdes_tot):,} SKUs", f"{int((verdes_tot['Costo ($)'] > 0).sum()):,} con costo")
+    g3.metric("💰 Con Costo y Precio Calculado", f"{len(con_costo):,} SKUs", f"Gan. prom: ${con_costo['Ganancia Neta'].mean() if not con_costo.empty else 0:,.0f}")
+    g4.metric("📦 Con Stock > 0 en Tienda", f"{len(con_stock):,} SKUs", f"{int(con_stock['Stock Publicable'].sum()):,} pzas totales")
+    g5.metric("🚀 Listos (✅ Recomendados)", f"{int((df_total['Semáforo'] == RECOMENDADO).sum()):,} SKUs")
+
+
 def _mostrar_gestos_verdes(df_total: pd.DataFrame) -> None:
-    """Resumen ejecutivo de los 4 cuadrantes verdes de la Matriz de Maslow."""
-    st.markdown("#### 🟢 Gestos del Sistema en los 4 Cuadrantes Verdes (*Empezar aquí*)")
+    st.markdown("#### 🟢 Desglose de los 4 Cuadrantes Verdes (*Empezar aquí*)")
     cols_v = st.columns(4)
     for col_ui, cuad in zip(cols_v, inv.CUADRANTES_VERDES):
         sub = df_total[df_total["Cuadrante"] == cuad]
+        con_costo = sub[sub["Costo ($)"] > 0]
         con_stk = sub[sub["Stock Publicable"] > 0]
         rec = int((sub["Semáforo"] == RECOMENDADO).sum())
-        gan_prom = float(con_stk["Ganancia Neta"].mean()) if not con_stk.empty else 0.0
+        gan_prom = float(con_costo["Ganancia Neta"].mean()) if not con_costo.empty else 0.0
         col_ui.metric(
             label=cuad,
-            value=f"{len(con_stk):,} con stock",
-            delta=f"{rec} recomendados · Gan. prom: ${gan_prom:,.0f}",
-            help=f"Total en catálogo para este cuadrante: {len(sub):,} SKUs",
+            value=f"{len(sub):,} SKUs en catálogo",
+            delta=f"{len(con_costo):,} con cálculo · {len(con_stk):,} con stock · {rec} rec. (Gan: ${gan_prom:,.0f})",
         )
 
 
 def _mostrar_metricas(df: pd.DataFrame, df_total: pd.DataFrame) -> None:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📦 SKUs en vista", f"{len(df):,}", help=f"de {len(df_total):,} en total")
-    c2.metric("✅ Recomendados", f"{int((df['Semáforo'] == RECOMENDADO).sum()):,}")
+    df_con_costo = df[df["Costo ($)"] > 0]
+    c1.metric("📦 SKUs en vista actual", f"{len(df):,}", help=f"de {len(df_total):,} en total")
+    c2.metric("✅ Recomendados en vista", f"{int((df['Semáforo'] == RECOMENDADO).sum()):,}")
     c3.metric("📸 Con carrusel HD (4/4)", f"{int((df['_num_fotos'] >= FOTOS_REQUERIDAS).sum()):,}")
-    c4.metric("💰 Ganancia neta promedio", f"${df['Ganancia Neta'].mean() if not df.empty else 0:,.2f}")
+    c4.metric(
+        "💰 Ganancia neta promedio (c/costo)",
+        f"${df_con_costo['Ganancia Neta'].mean() if not df_con_costo.empty else 0:,.2f}",
+    )
 
 
 def _mostrar_matriz(df: pd.DataFrame, tienda_id: int, tienda_nombre: str) -> None:
@@ -765,10 +748,6 @@ def _mostrar_matriz(df: pd.DataFrame, tienda_id: int, tienda_nombre: str) -> Non
     if b2.button("⬜ Desmarcar visibles", use_container_width=True):
         st.session_state.seleccion_ml -= ids_vista
         st.session_state.ver_editor += 1
-    st.caption(
-        "Marca **Seleccionado** en los productos que vas a vender: se guardan solos y son los que se "
-        "exportan a Mercado Libre y generan alertas de pausa."
-    )
 
     columnas = COLUMNAS_MATRIZ
     df_editor = df.assign(**{"Subir a ML": df["ID Price Shoes"].isin(st.session_state.seleccion_ml)})[columnas]
@@ -777,7 +756,7 @@ def _mostrar_matriz(df: pd.DataFrame, tienda_id: int, tienda_nombre: str) -> Non
         df_editor,
         use_container_width=True,
         hide_index=True,
-        height=400,
+        height=440,
         column_config={
             "Subir a ML": st.column_config.CheckboxColumn("Seleccionado", default=False),
             "Stock Publicable": st.column_config.NumberColumn(f"Piezas en {tienda_nombre}"),
@@ -792,7 +771,7 @@ def _mostrar_matriz(df: pd.DataFrame, tienda_id: int, tienda_nombre: str) -> Non
             "Ganancia directa ($)": st.column_config.NumberColumn("Ganancia directa ($)", format="$%.0f"),
         },
         disabled=[c for c in columnas if c != "Subir a ML"],
-        key=f"editor_{st.session_state.ver_editor}_{hash(tuple(df['ID Price Shoes']))}",
+        key=f"editor_{st.session_state.ver_editor}_{len(df)}",
     )
 
     for id_, marcado in zip(editado["ID Price Shoes"], editado["Subir a ML"]):
@@ -837,8 +816,7 @@ def _mostrar_acciones_seleccion(df_total: pd.DataFrame) -> None:
             )
         st.success(
             f"✅ Exportación generada en `{resumen['carpeta']}` · "
-            f"Nuevas: {len(resumen['ids_nuevas'])} productos · Omitidos: {resumen['omitidos']} · "
-            f"Archivos: {', '.join(resumen['archivos'].keys()) or 'ninguno'}"
+            f"Nuevas: {len(resumen['ids_nuevas'])} productos · Omitidos: {resumen['omitidos']}"
         )
 
 
@@ -893,21 +871,19 @@ def _preparar_datos_de_tienda(df_cargado: pd.DataFrame) -> Tuple[pd.DataFrame, i
 
 
 def renderizar_panel() -> None:
-    st.title("👟 Zapatería Vallejo · Centro de Control e Inventario")
+    st.title("👟 Zapatería Vallejo · Centro de Control e Inventario Completo")
 
     firma = firma_fuentes()
     df_cargado = cargar_datos_inventario(firma)
 
     if df_cargado.empty:
-        st.warning(
-            "⚠️ Aún no se encontraron artículos con costo auditado en `data/zapateria_vallejo.db` "
-            "o carpetas en `data/catalogo_listo`. Ejecuta primero `python pipeline_catalogo.py`."
-        )
+        st.warning("⚠️ La tabla `zapatos_candidatos` en `data/zapateria_vallejo.db` está vacía.")
         return
 
     inicializar_estado(df_cargado)
     df_total, tienda_id, tienda_nombre = _preparar_datos_de_tienda(df_cargado)
 
+    _mostrar_radiografia_global(df_total)
     _mostrar_gestos_verdes(df_total)
     st.markdown("---")
 
