@@ -45,16 +45,21 @@ TIPO_SIN_CLASIFICAR = "Sin clasificar"
 _RE_NOMBRE_PROVISIONAL = re.compile(r"^\s*(?:(?:cat[aá]logo|modelo)\s+\S+)?\s*$", re.IGNORECASE)
 
 _REGLAS_NO_CALZADO: List[Tuple[str, str]] = [
+    ("Hogar", r"cobertor|edred[oó]n|s[aá]bana|almohada|coj[ií]n|toalla|cortina|tapete|sart[eé]n|olla|vajilla|"
+              r"termo|botella|contenedor|licuadora|cafetera|peluche|hogar|frasco|vidrio|cristal|tapa|vaso|taza|"
+              r"plato|recipiente|jarra|jarr[oó]n|molde|refractario|cubierto|cuchara|tenedor|cuchillo|especiero|"
+              r"organizador|canasta|cesta|vela|difusor|florero|portarretrato|adorno|esfera|guirnalda|arrocera|"
+              r"comal|cacerola|utensilio|frazada|mantel|tupper|cilindro|l[aá]mpara|charola|ensaladera|azucarera|"
+              r"salero|servilletero|escurridor|basurero|juguete|mu[ñn]eca|rompecabezas"),
     ("Ropa", r"ropa|pantal[oó]n|pantalones|jeans|mezclilla|playera|camisa|blusa|chamarra|sudadera|su[eé]ter|"
              r"chaleco|vestido|falda|short|bermuda|legging|mall[oó]n|jogger|pants|pijama|bata|boxer|b[oó]xer|"
              r"calz[oó]n|trusa|brasier|bra|faja|calcet[ií]n|calcetines|calceta|calcetas|tines|medias|"
              r"abrigo|saco|blazer|conjunto|polo|top|body|camiseta|mameluco|sweater|capa|sobrecamisa|"
-             r"gabardina|panty|jersey|romper|filipina|calentador|calentadores"),
+             r"gabardina|panty|jersey|romper|filipina|calentador|calentadores|bikini"),
     ("Accesorios", r"accesorio|bolsa|bolso|mochila|minimochila|backpack|cartera|cangurera|gorra|gorro|sombrero|"
                    r"cintur[oó]n|reloj|lentes|gafas|bufanda|guantes|paraguas|lonchera|lapicera|llavero|maleta|"
-                   r"perfume|fragancia|loci[oó]n|shampoo|crema"),
-    ("Hogar", r"cobertor|edred[oó]n|s[aá]bana|almohada|coj[ií]n|toalla|cortina|tapete|sart[eé]n|olla|vajilla|"
-              r"termo|botella|contenedor|licuadora|cafetera|peluche|hogar"),
+                   r"perfume|fragancia|loci[oó]n|shampoo|crema|cosmetiquera|monedero|collar|pulsera|arete|"
+                   r"anillo|diadema|joyer[ií]a|aud[ií]fono|bocina|cepillo|peine|espejo|estuche"),
 ]
 
 _REGLAS_CALZADO: List[Tuple[str, str]] = [
@@ -67,8 +72,11 @@ _REGLAS_CALZADO: List[Tuple[str, str]] = [
                 r"ballerina|flat|cu[ñn]a|cu\s+a|sueco|zueco|escolar|top\s*sider|alpargata|calzado"),
 ]
 
+TIPOS_CALZADO: Tuple[str, ...] = tuple(t for t, _ in _REGLAS_CALZADO)
+TIPOS_NO_CALZADO: Tuple[str, ...] = tuple(t for t, _ in _REGLAS_NO_CALZADO)
+
 TIPOS_PRODUCTO: List[str] = (
-    [t for t, _ in _REGLAS_CALZADO] + [t for t, _ in _REGLAS_NO_CALZADO] + [TIPO_OTROS, TIPO_SIN_CLASIFICAR]
+    list(TIPOS_CALZADO) + list(TIPOS_NO_CALZADO) + [TIPO_OTROS, TIPO_SIN_CLASIFICAR]
 )
 
 # Etapas y cuadrantes de la Matriz de Necesidades de Ricardo
@@ -87,6 +95,11 @@ CUADRANTES_VERDES: Tuple[str, ...] = (
     CUADRANTE_SANDALIA_BOTA,
     CUADRANTE_PANTUFLA,
 )
+
+# Catálogos 100% de calzado (solo para priorizar SKUs que aún tienen nombre provisional)
+_CATALOGOS_SOLO_CALZADO = {
+    "1370231", "1368789", "1345253", "1380328", "1380359", "1380363", "1380367",
+}
 
 
 def _coincide(patron: str, texto: str) -> bool:
@@ -109,7 +122,8 @@ def clasificar_tipo_producto(nombre: str, categoria_ps: str = "") -> str:
         return TIPO_SIN_CLASIFICAR
 
     raiz = partes[0] if partes else ""
-    tipo = _primer_tipo(" ".join(partes[1:])) or _primer_tipo(nombre) or _primer_tipo(raiz)
+    # Priorizar el nombre real del producto y las subcategorías antes que la raíz
+    tipo = _primer_tipo(nombre) or _primer_tipo(" ".join(partes[1:])) or _primer_tipo(raiz)
     if tipo:
         return tipo
     return "Zapatos" if _coincide("calzado", raiz) else TIPO_OTROS
@@ -117,52 +131,65 @@ def clasificar_tipo_producto(nombre: str, categoria_ps: str = "") -> str:
 
 def clasificar_matriz_maslow(nombre: str, origen_catalogo: str = "", tipo_prod: str = "") -> Tuple[str, str]:
     """
-    Evalúa a qué etapa y cuadrante de la Matriz de Maslow pertenece el producto:
-      - 🟢 Empezar aquí (Verdes): Escolar, Licencias, Sandalias y botas de moda, Pantuflas.
-      - 🟠 Segunda etapa (Naranjas): Tenis urbanos de dama, Línea confort.
-      - ⚪ Dejar para después (Grises): Resto del catálogo.
+    Evalúa la etapa y cuadrante de la Matriz de Maslow con doble candado:
+    ningún artículo de Hogar, Ropa o Accesorios puede entrar a los cuadrantes verdes/naranjas.
     """
-    txt = f"{nombre or ''} {origen_catalogo or ''} {tipo_prod or ''}".lower()
+    nom_clean = str(nombre or "").strip()
     cat = str(origen_catalogo or "").lower()
-    tipo = str(tipo_prod or "")
+    tipo = str(tipo_prod or "").strip()
+
+    # Recalcular tipo desde el nombre si viene vacío o genérico
+    if tipo in ("", TIPO_OTROS, TIPO_SIN_CLASIFICAR):
+        tipo = clasificar_tipo_producto(nom_clean)
+
+    # Candado 1: Si es Hogar, Ropa o Accesorios, sale de inmediato hacia Grises
+    if tipo in TIPOS_NO_CALZADO:
+        return ETAPA_GRIS, "⚪ Dejar para después"
+
+    es_provisional = bool(_RE_NOMBRE_PROVISIONAL.match(nom_clean))
+    es_calzado_confirmado = tipo in TIPOS_CALZADO
+
+    # Candado 2: Si ya tiene nombre real y NO es calzado confirmado, jamás entra a Verdes/Naranjas
+    if not es_provisional and not es_calzado_confirmado:
+        return ETAPA_GRIS, "⚪ Dejar para después"
+
+    # Si aún tiene nombre provisional, solo entra a Verdes si viene de un catálogo 100% de calzado
+    if es_provisional and not any(c in cat for c in _CATALOGOS_SOLO_CALZADO):
+        return ETAPA_GRIS, "⚪ Dejar para después"
+
+    txt = f"{nom_clean} {cat} {tipo}".lower()
 
     # 1. 🟢 Calzado escolar (Niños 0-12 · Fisiológicas)
     if "1370231" in cat or re.search(r"\b(escolar|escolares|colegial)\b", txt):
         return ETAPA_VERDE, CUADRANTE_ESCOLAR
 
     # 2. 🟢 Tenis con licencia (Niños 0-12 · Pertenencia)
-    if any(c in cat for c in ("1348800", "1368804", "1348783", "1378033", "1381556")) or re.search(
-        r"\b(licencia|disney|minnie|mickey|stitch|sonic|bluey|paw\s*patrol|spiderman|barbie|"
-        r"hello\s*kitty|kuromi|mario|frozen|princesas|avengers|cars|toy\s*story|minions|peppa|batman|luces)\b",
-        txt,
-    ):
-        if tipo not in ("Ropa", "Accesorios", "Hogar"):
-            return ETAPA_VERDE, CUADRANTE_LICENCIA
-
-    # 3. 🟢 Pantuflas (Adultos 25-54 · Fisiológicas)
-    if tipo == "Pantuflas" or any(c in cat for c in ("1381350", "1380996", "1380350")) or re.search(
-        r"\b(pantufla|pantuflas|mushu)\b", txt
-    ):
-        if tipo not in ("Ropa", "Accesorios", "Hogar"):
-            return ETAPA_VERDE, CUADRANTE_PANTUFLA
-
-    # 4. 🟢 Sandalias y botas de moda (Adultos 25-54 · Pertenencia)
-    es_industrial_o_invierno_nino = bool(
-        re.search(r"\b(industrial|casco|diel[eé]ctrico|goodyear|ni[ñn][oa]|infantil|kids|beb[eé])\b", txt)
-    )
-    if not es_industrial_o_invierno_nino and (
-        tipo in ("Sandalias", "Botas y botines")
-        or any(
-            c in cat
-            for c in (
-                "1368789", "1345253", "1380328", "1380359", "1380363", "1380367",
-                "1381342", "1380337", "1380341",
+    if (
+        tipo in ("Tenis", "Zapatos", "Botas y botines", "Sandalias")
+        and (
+            any(c in cat for c in ("1348800", "1368804", "1348783", "1378033", "1381556"))
+            or re.search(
+                r"\b(licencia|disney|minnie|mickey|stitch|sonic|bluey|paw\s*patrol|spiderman|barbie|"
+                r"hello\s*kitty|kuromi|mario|frozen|princesas|avengers|cars|toy\s*story|minions|peppa|batman|luces)\b",
+                txt,
             )
         )
-        or re.search(r"\b(sandalia|sandalias|huarache|chancla|slide|bota|botas|bot[ií]n|botines)\b", txt)
     ):
-        if tipo not in ("Ropa", "Accesorios", "Hogar"):
-            return ETAPA_VERDE, CUADRANTE_SANDALIA_BOTA
+        return ETAPA_VERDE, CUADRANTE_LICENCIA
+
+    # 3. 🟢 Pantuflas (Adultos 25-54 · Fisiológicas) -> SOLO si realmente es pantufla
+    if tipo == "Pantuflas" or re.search(r"\b(pantufla|pantuflas)\b", nom_clean.lower()):
+        return ETAPA_VERDE, CUADRANTE_PANTUFLA
+
+    # 4. 🟢 Sandalias y botas de moda (Adultos 25-54 · Pertenencia)
+    es_industrial_o_nino = bool(
+        re.search(r"\b(industrial|casco|diel[eé]ctrico|goodyear|ni[ñn][oa]|infantil|kids|beb[eé])\b", txt)
+    )
+    if not es_industrial_o_nino and (
+        tipo in ("Sandalias", "Botas y botines")
+        or (es_provisional and any(c in cat for c in ("1368789", "1345253", "1380328", "1380359", "1380363", "1380367")))
+    ):
+        return ETAPA_VERDE, CUADRANTE_SANDALIA_BOTA
 
     # 5. 🟠 Segunda etapa: Línea confort y Tenis urbanos de dama
     if any(c in cat for c in ("1353843", "1381316")) or re.search(r"\b(confort|med\s*chef|ortop[eé]dico|descanso)\b", txt):
@@ -170,11 +197,9 @@ def clasificar_matriz_maslow(nombre: str, origen_catalogo: str = "", tipo_prod: 
 
     if (
         tipo == "Tenis"
-        or any(c in cat for c in ("1346256", "1353557", "1380516", "1368805"))
-        or re.search(r"\b(urbano|urbanos|juvenil|sneaker)\b", txt)
-    ) and not re.search(r"\b(futbol|f[uú]tbol|correr|running|caballero|hombre)\b", txt):
-        if tipo not in ("Ropa", "Accesorios", "Hogar"):
-            return ETAPA_NARANJA, "🟠 Tenis urbanos de dama (Jóvenes 13-24)"
+        and not re.search(r"\b(futbol|f[uú]tbol|correr|running|caballero|hombre)\b", txt)
+    ):
+        return ETAPA_NARANJA, "🟠 Tenis urbanos de dama (Jóvenes 13-24)"
 
     return ETAPA_GRIS, "⚪ Dejar para después"
 

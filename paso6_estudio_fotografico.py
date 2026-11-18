@@ -849,6 +849,39 @@ PERFILES_CATALOGO: Dict[str, Dict[str, Any]] = {
             ("MIDE CON REGLA", "Mide la distancia del borde de la hoja a la marca: esos centímetros son tu talla MX."),
         ],
     },
+    "articulo_general": {
+        "tipo": "articulo_general",
+        "unidad_chip": "ESTADO",
+        "subtitulo_03": "ARTÍCULO 100% NUEVO Y ORIGINAL  ·  GARANTÍA DIRECTA",
+        "badge_izq_inf": "CALIDAD VERIFICADA Y EMPAQUE REFORZADO",
+        "beneficios": [
+            ("ARTÍCULO 100% NUEVO Y ORIGINAL", "Producto estrictamente nuevo, revisado pieza por pieza antes de empacar."),
+            ("EMPAQUE DE ALTA PROTECCIÓN", "Protegido con material amortiguante para llegar intacto a tu domicilio."),
+            ("CALIDAD DE CATÁLOGO OFICIAL", "Acabados y materiales verificados para uso diario con total durabilidad."),
+            ("COMPRA 100% PROTEGIDA", "Aprobada la transacción, tu pedido se procesa con respaldo total."),
+        ],
+        "titulo_04": "ESPECIFICACIONES Y GARANTÍA DE COMPRA",
+        "subtitulo_04": "PRODUCTO NUEVO  ·  CONTROL DE CALIDAD Y ENVÍO SEGURO",
+        "columnas_04": ("ATRIBUTO", "ESPECIFICACIÓN", "RESPALDO"),
+        "filas_izq": [
+            ("CONDICIÓN", "100% Nuevo", "Sellado / Revisado"),
+            ("ORIGEN", "Catálogo Oficial", "Lote Verificado"),
+            ("EMPAQUE", "Caja / Protección", "Envío Seguro"),
+            ("DESPACHO", "Desde CDMX", "Rastreo Activo"),
+        ],
+        "filas_der": [
+            ("FACTURACIÓN", "Disponible", "Compra Formal"),
+            ("REVISIÓN", "Control Previo", "Sin Defectos"),
+            ("ATENCIÓN", "Soporte Directo", "Sección Preguntas"),
+            ("GARANTÍA", "Compra Protegida", "Respaldo Total"),
+        ],
+        "tallas_default": ["NUEVO", "ORIGINAL", "EN STOCK"],
+        "pasos_04": [
+            ("REVISA LA DESCRIPCIÓN", "Confirma el contenido del paquete, medidas y color en la ficha de la publicación."),
+            ("PREGUNTA SIN COMPROMISO", "Si tienes dudas sobre capacidad o dimensiones, escríbenos antes de ofertar."),
+            ("RECIBE PROTEGIDO", "Tu compra viaja embalada contra golpes y respaldada hasta llegar a tus manos."),
+        ],
+    },
 }
 
 
@@ -882,10 +915,16 @@ REGLAS_PERFIL_NO_CALZADO: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         r"\b(perfume|perfumes|fragancia|fragancias|locion|loci[oó]n|eau\s*de|colonia|body\s*mist|desodorante|cosmetico|cosm[eé]tico|maquillaje|labial|crema\s*corporal|shampoo|limpiador)\b"
     )),
     ("hogar_cocina", re.compile(
-        r"\b(arrocera|comal|sart[eé]n|sartenes|olla|ollas|cacerola|bater[ií]a\s*de\s*cocina|licuadora|cafetera|termo|vajilla|utensilio|cobertor|edred[oó]n|s[aá]bana|sabanas|frazada|almohada|coj[ií]n|toalla|mantel|cortina|tapete|hogar)\b"
+        r"\b(arrocera|comal|sart[eé]n|sartenes|olla|ollas|cacerola|bater[ií]a\s*de\s*cocina|licuadora|cafetera|termo|vajilla|utensilio|"
+        r"cobertor|edred[oó]n|s[aá]bana|sabanas|frazada|almohada|coj[ií]n|toalla|mantel|cortina|tapete|hogar|"
+        r"frasco|frascos|vidrio|cristal|tapa|tapas|vaso|vasos|taza|tazas|plato|platos|recipiente|recipientes|"
+        r"jarra|jarras|jarr[oó]n|molde|moldes|refractario|cubiertos?|cuchara|tenedor|cuchillo|especiero|"
+        r"organizador|canasta|cesta|vela|velas|difusor|florero|portarretrato|adorno|esfera|guirnalda|"
+        r"tupper|cilindro|botella|botellas|contenedor|contenedores|l[aá]mpara|charola|ensaladera|azucarera|salero|escurridor|basurero)\b"
     )),
     ("accesorios", re.compile(
-        r"\b(gorra|gorras|gorro|sombrero|visera|snapback|mochila|mochilas|bolsa|bolsas|bolso|cartera|cangurera|mariconera|maleta|lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes)\b"
+        r"\b(gorra|gorras|gorro|sombrero|visera|snapback|mochila|mochilas|bolsa|bolsas|bolso|cartera|cangurera|mariconera|maleta|"
+        r"lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes|cosmetiquera|monedero|collar|pulsera|aretes|joyer[ií]a|estuche|peluche|juguete)\b"
     )),
     ("calcetin", re.compile(
         r"\b(calcet[ií]n|calcetines|calceta|calcetas|tin|tines|medias|tobimedias?|media(?!\s+(?:manga|ca[ñn]a|suela|tac[oó]n)))\b"
@@ -907,6 +946,43 @@ REGLAS_PERFIL_NO_CALZADO: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         r"\b(pantal[oó]n|pantalones|jeans|mezclilla|skinny|superskinny|short|shorts|bermuda|bermudas|falda|faldas|legging|leggings|mall[oó]n|jogger|joggers|pants|capri)\b"
     )),
 )
+
+
+def detectar_perfil_prenda(
+    nombre: str, marca: str, corte: str, tallas_bd: List[str], origen_catalogo: str = ""
+) -> Dict[str, Any]:
+    texto_nombre = nombre.lower()
+    texto_cat = str(origen_catalogo or "").lower()
+    texto = f"{nombre} {marca} {corte} {origen_catalogo}".lower()
+    tallas_num = [
+        float(m.group(1))
+        for t in tallas_bd
+        if (m := re.match(r"^(\d+(?:\.\d+)?)$", str(t).strip())) and 10.0 <= float(m.group(1)) <= 33.0
+    ]
+
+    # 1. Calzado confirmado en el nombre del producto
+    if RE_CALZADO.search(texto_nombre) and not RE_NO_CALZADO.search(texto_nombre):
+        return _perfil_calzado(texto, tallas_num, RE_INFANTIL_CALZADO)
+
+    # 2. Artículos de Hogar, Cocina, Accesorios, Perfumería o Ropa
+    for clave_perfil, patron in REGLAS_PERFIL_NO_CALZADO:
+        if patron.search(texto_nombre):
+            return PERFILES_CATALOGO[clave_perfil]
+
+    for clave_perfil, patron in REGLAS_PERFIL_NO_CALZADO:
+        if patron.search(texto):
+            return PERFILES_CATALOGO[clave_perfil]
+
+    # 3. Si viene de un catálogo de Hogar y no dice explícitamente calzado -> Hogar
+    if any(k in texto_cat for k in ("1381350", "1380350", "home")):
+        return PERFILES_CATALOGO["hogar_cocina"]
+
+    # 4. Solo si tiene tallas numéricas reales de pie o catálogo puramente de calzado
+    if tallas_num or RE_CALZADO.search(texto_cat):
+        return _perfil_calzado(texto, tallas_num, RE_INFANTIL_GENERICO)
+
+    # 5. Fallback seguro: nunca asumir calzado si no hay evidencia de que sea zapato
+    return PERFILES_CATALOGO["articulo_general"]
 
 
 def _perfil_calzado(texto: str, tallas_num: List[float], patron_infantil: "re.Pattern[str]") -> Dict[str, Any]:
