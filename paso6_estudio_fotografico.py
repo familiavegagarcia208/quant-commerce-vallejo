@@ -896,7 +896,10 @@ RE_CALZADO = re.compile(
 )
 RE_NO_CALZADO = re.compile(
     r"\b(pantal[oó]n|pantalones|jeans|mezclilla|calcet[ií]n|calcetines|calceta|calcetas|tines?|medias|"
-    r"mochila|bolsa|gorra|playera|camisa|chamarra|sudadera|short|shorts|legging|leggings|perfume)\b",
+    r"mochila|bolsa|gorra|playera|camisa|chamarra|sudadera|short|shorts|legging|leggings|perfume|"
+    r"protector|protectores|juanete|juanetes|plantilla|plantillas|talonera|taloneras|agujeta|agujetas|"
+    r"cord[oó]n|cordones|calzador|limpiador|espuma|cepillo|esponja|grasa|tinta|repelente|"
+    r"impermeabilizante|horma|hormas|separador|almohadilla|corrector|parche|tobillera|rodillera|talco)\b",
     re.I,
 )
 RE_INFANTIL_CALZADO = re.compile(
@@ -924,7 +927,9 @@ REGLAS_PERFIL_NO_CALZADO: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     )),
     ("accesorios", re.compile(
         r"\b(gorra|gorras|gorro|sombrero|visera|snapback|mochila|mochilas|bolsa|bolsas|bolso|cartera|cangurera|mariconera|maleta|"
-        r"lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes|cosmetiquera|monedero|collar|pulsera|aretes|joyer[ií]a|estuche|peluche|juguete)\b"
+        r"lonchera|lapicera|cintur[oó]n|lentes|gafas|reloj|paraguas|bufanda|guantes|cosmetiquera|monedero|collar|pulsera|aretes|joyer[ií]a|estuche|peluche|juguete|"
+        r"protector|protectores|juanete|juanetes|plantilla|plantillas|talonera|taloneras|agujeta|agujetas|cord[oó]n|cordones|calzador|"
+        r"limpiador|espuma|cepillo|esponja|grasa|tinta|repelente|impermeabilizante|horma|hormas|separador|almohadilla|corrector|parche|tobillera|rodillera|talco)\b"
     )),
     ("calcetin", re.compile(
         r"\b(calcet[ií]n|calcetines|calceta|calcetas|tin|tines|medias|tobimedias?|media(?!\s+(?:manga|ca[ñn]a|suela|tac[oó]n)))\b"
@@ -951,7 +956,7 @@ REGLAS_PERFIL_NO_CALZADO: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
 def detectar_perfil_prenda(
     nombre: str, marca: str, corte: str, tallas_bd: List[str], origen_catalogo: str = ""
 ) -> Dict[str, Any]:
-    texto_nombre = nombre.lower()
+    texto_nombre = nombre.lower().strip()
     texto_cat = str(origen_catalogo or "").lower()
     texto = f"{nombre} {marca} {corte} {origen_catalogo}".lower()
     tallas_num = [
@@ -960,28 +965,31 @@ def detectar_perfil_prenda(
         if (m := re.match(r"^(\d+(?:\.\d+)?)$", str(t).strip())) and 10.0 <= float(m.group(1)) <= 33.0
     ]
 
-    # 1. Calzado confirmado en el nombre del producto
-    if RE_CALZADO.search(texto_nombre) and not RE_NO_CALZADO.search(texto_nombre):
-        return _perfil_calzado(texto, tallas_num, RE_INFANTIL_CALZADO)
-
-    # 2. Artículos de Hogar, Cocina, Accesorios, Perfumería o Ropa
+    # 1. Prioridad máxima: si el nombre contiene palabras de NO calzado (ej. "Protector De Juanete", "Limpiador De Tenis")
     for clave_perfil, patron in REGLAS_PERFIL_NO_CALZADO:
         if patron.search(texto_nombre):
             return PERFILES_CATALOGO[clave_perfil]
 
+    # 2. Calzado confirmado en el nombre real del producto
+    if RE_CALZADO.search(texto_nombre) and not RE_NO_CALZADO.search(texto_nombre):
+        return _perfil_calzado(texto, tallas_num, RE_INFANTIL_CALZADO)
+
+    # 3. Revisar marca/corte/catálogo para categorías no-calzado
     for clave_perfil, patron in REGLAS_PERFIL_NO_CALZADO:
         if patron.search(texto):
             return PERFILES_CATALOGO[clave_perfil]
 
-    # 3. Si viene de un catálogo de Hogar y no dice explícitamente calzado -> Hogar
     if any(k in texto_cat for k in ("1381350", "1380350", "home")):
         return PERFILES_CATALOGO["hogar_cocina"]
 
-    # 4. Solo si tiene tallas numéricas reales de pie o catálogo puramente de calzado
-    if tallas_num or RE_CALZADO.search(texto_cat):
+    # 4. Solo asumir calzado por catálogo/tallas si el producto AÚN no tiene nombre real (provisional)
+    es_nombre_provisional = bool(
+        re.match(r"^(?:calzado\s+selecci[oó]n\s+oficial|(?:modelo|cat[aá]logo)\s+\S+)$", texto_nombre)
+    )
+    if es_nombre_provisional and (tallas_num or RE_CALZADO.search(texto_cat)):
         return _perfil_calzado(texto, tallas_num, RE_INFANTIL_GENERICO)
 
-    # 5. Fallback seguro: nunca asumir calzado si no hay evidencia de que sea zapato
+    # 5. Fallback seguro: artículo general sin tallas de pie ni textos de calzado
     return PERFILES_CATALOGO["articulo_general"]
 
 

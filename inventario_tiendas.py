@@ -59,7 +59,9 @@ _REGLAS_NO_CALZADO: List[Tuple[str, str]] = [
     ("Accesorios", r"accesorio|bolsa|bolso|mochila|minimochila|backpack|cartera|cangurera|gorra|gorro|sombrero|"
                    r"cintur[oó]n|reloj|lentes|gafas|bufanda|guantes|paraguas|lonchera|lapicera|llavero|maleta|"
                    r"perfume|fragancia|loci[oó]n|shampoo|crema|cosmetiquera|monedero|collar|pulsera|arete|"
-                   r"anillo|diadema|joyer[ií]a|aud[ií]fono|bocina|cepillo|peine|espejo|estuche"),
+                   r"anillo|diadema|joyer[ií]a|aud[ií]fono|bocina|cepillo|peine|espejo|estuche|"
+                   r"protector|juanete|plantilla|talonera|agujeta|cord[oó]n|calzador|limpiador|esponja|"
+                   r"grasa|tinta|repelente|impermeabilizante|horma|separador|almohadilla|corrector|parche|tobillera|rodillera|talco"),
 ]
 
 _REGLAS_CALZADO: List[Tuple[str, str]] = [
